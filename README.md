@@ -18,6 +18,11 @@ Targets `software-mansion/argent` and shells out to the authenticated `gh` CLI.
 Every row is clickable → opens the PR/issue in your browser. Counts show on each
 card; hit ↻ to refresh, ⏻ to quit.
 
+**Reverse lookup:** type a PR/issue number in the search box (press **⌘F** to jump to
+it) and it instantly shows which of the four lists that number is on — a ✓/— checklist
+plus what the number is (open PR/issue, author, draft/ready). Cache-only, so it reacts
+as you type. Launch with `ARGENT_UTILS_PREFILL=<n>` to open pre-focused on a number.
+
 ### Definitions / heuristics (where it's deliberately loose)
 
 - **"only open"** — all PR tools query `states: OPEN`; the issues tool queries open issues.
@@ -46,7 +51,18 @@ open ./ArgentUtils.app
 ```
 
 Drag `ArgentUtils.app` into `/Applications` and add it under
-System Settings → General → Login Items to keep the wrench in your menu bar.
+System Settings → General → Login Items — or just use the autostart script below.
+
+### Autostart on login
+
+```bash
+./scripts/install-autostart.sh     # installs to /Applications + a login LaunchAgent, starts it now
+./scripts/uninstall-autostart.sh   # removes the LaunchAgent and stops the app
+```
+
+Installs a per-user LaunchAgent at `~/Library/LaunchAgents/com.ignacy.argent-utils.plist`
+(`RunAtLoad`), so the wrench reappears on every login. The ⏻ Quit button still works
+within a session (no `KeepAlive`) — it just returns next login.
 
 ### Headless self-test
 

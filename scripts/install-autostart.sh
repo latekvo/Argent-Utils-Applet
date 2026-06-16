@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Install ArgentUtils as a per-user LaunchAgent so it autostarts on every login,
+# and start it now. Re-runnable (it replaces any previous install).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+LABEL="com.ignacy.argent-utils"
+APP="ArgentUtils.app"
+
+# Build the bundle if needed.
+[ -d "$APP" ] || ./scripts/build-app.sh
+
+# Install to /Applications (fall back to ~/Applications if not writable).
+if [ -w /Applications ]; then
+  DEST_DIR="/Applications"
+else
+  DEST_DIR="$HOME/Applications"; mkdir -p "$DEST_DIR"
+fi
+rm -rf "$DEST_DIR/$APP"
+cp -R "$APP" "$DEST_DIR/"
+BIN="$DEST_DIR/$APP/Contents/MacOS/ArgentUtils"
+echo "Installed app → $DEST_DIR/$APP"
+
+# Write the LaunchAgent.
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+mkdir -p "$HOME/Library/LaunchAgents"
+cat > "$PLIST" <<PL
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array><string>$BIN</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardErrorPath</key><string>/tmp/argent-utils.err.log</string>
+</dict>
+</plist>
+PL
+echo "Wrote $PLIST"
+
+# Kill any running/old instance + old agent, then (re)load. RunAtLoad starts it now.
+launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+pkill -x ArgentUtils 2>/dev/null || true
+sleep 1
+launchctl bootstrap "gui/$(id -u)" "$PLIST"
+echo "Loaded. Autostarts on login and is running now (look for the wrench in your menu bar)."
