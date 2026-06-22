@@ -6,6 +6,13 @@ public struct ReviewDepth: Identifiable {
     public let title: String
     public let blurb: String
     public let fragment: String
+
+    public init(id: String, title: String, blurb: String, fragment: String) {
+        self.id = id
+        self.title = title
+        self.blurb = blurb
+        self.fragment = fragment
+    }
 }
 
 /// Read-only access to the review-prompt model in `core/review.json`.
