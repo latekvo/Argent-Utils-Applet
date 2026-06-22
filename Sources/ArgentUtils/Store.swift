@@ -90,10 +90,20 @@ final class Store: ObservableObject {
     @Published var hiddenTools: Set<String> {
         didSet { UserDefaults.standard.set(Array(hiddenTools), forKey: Keys.hiddenTools) }
     }
+    /// Per-tool tint overrides (`ToolKind.rawValue` → "#RRGGBB").
+    @Published var colorOverrides: [String: String] {
+        didSet { UserDefaults.standard.set(colorOverrides, forKey: Keys.colorOverrides) }
+    }
+    /// Which terminal SPAWN AGENT opens (`SpawnTerminal.rawValue`).
+    @Published var terminalChoice: String {
+        didSet { UserDefaults.standard.set(terminalChoice, forKey: Keys.terminalChoice) }
+    }
 
     private enum Keys {
         static let usernameOverride = "usernameOverride"
         static let hiddenTools = "hiddenTools"
+        static let colorOverrides = "colorOverrides"
+        static let terminalChoice = "terminalChoice"
     }
 
     /// The handle to treat as "me": the user's override if set, else the gh login.
@@ -101,6 +111,17 @@ final class Store: ObservableObject {
         let o = usernameOverride.trimmingCharacters(in: .whitespaces)
         return o.isEmpty ? me : o
     }
+
+    /// A tool's tint: the user's override if set & valid, else its built-in default.
+    func tint(for kind: ToolKind) -> Color {
+        if let hex = colorOverrides[kind.rawValue], let c = Color(hex: hex) { return c }
+        return kind.tint
+    }
+    func setTint(_ color: Color, for kind: ToolKind) {
+        colorOverrides[kind.rawValue] = color.hexRGB
+    }
+    /// The terminal SPAWN AGENT will use, as a typed value (defaults to iTerm).
+    var terminal: SpawnTerminal { SpawnTerminal(rawValue: terminalChoice) ?? .iterm }
     /// Tools shown in the grid (and reverse-lookup checklist), in canonical order.
     var visibleTools: [ToolKind] {
         ToolKind.allCases.filter { !hiddenTools.contains($0.rawValue) }
@@ -127,6 +148,9 @@ final class Store: ObservableObject {
         let defaults = UserDefaults.standard
         usernameOverride = defaults.string(forKey: Keys.usernameOverride) ?? ""
         hiddenTools = Set(defaults.stringArray(forKey: Keys.hiddenTools) ?? [])
+        colorOverrides = (defaults.dictionary(forKey: Keys.colorOverrides) as? [String: String]) ?? [:]
+        terminalChoice = defaults.string(forKey: Keys.terminalChoice)
+            ?? (SpawnTerminal.iterm.isInstalled ? SpawnTerminal.iterm.rawValue : SpawnTerminal.terminal.rawValue)
         // If the default selection was hidden in a previous session, re-point it.
         if hiddenTools.contains(selected.rawValue),
            let first = ToolKind.allCases.first(where: { !hiddenTools.contains($0.rawValue) }) {
@@ -137,7 +161,18 @@ final class Store: ObservableObject {
         // right after one fetch); only the live menu-bar app polls.
         let env = ProcessInfo.processInfo.environment
         let headless = env["ARGENT_UTILS_DUMP"] == "1" || env["ARGENT_UTILS_LOOKUP"] != nil
-        if !headless { startAutoRefresh() }
+        if !headless {
+            startAutoRefresh()
+            // Eagerly resolve the gh-authenticated user so the "my PRs" tools and
+            // the settings field reflect the real default before the first refresh.
+            Task { await fetchMe() }
+        }
+    }
+
+    /// Cheap single-query fetch of the gh viewer login (the default identity).
+    func fetchMe() async {
+        guard me.isEmpty, let login = try? await API.fetchViewerLogin() else { return }
+        me = login
     }
 
     /// Fire a refresh every `autoRefreshInterval`, independent of whether the

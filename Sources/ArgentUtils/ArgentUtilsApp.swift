@@ -30,6 +30,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // mode so a dump/lookup run can't kill the live menu-bar app.
         if !headless {
             SingleInstance.terminateOthers()
+
+            // First run from a terminal (`swift run`): offer to install as a login
+            // daemon. If accepted, the detached installer builds + launches the
+            // daemon, which replaces this instance via the singleton. We keep
+            // running rather than exit, so a *failed* install still leaves a
+            // usable wrench in the menu bar instead of nothing.
+            Daemon.offerInstallIfInteractive()
+
+            // Proactively provoke the macOS "control <terminal>" automation prompt
+            // once, so SPAWN AGENT works without a per-first-use prompt later.
+            let defaults = UserDefaults.standard
+            if !defaults.bool(forKey: "didTriggerTerminalAutomation") {
+                defaults.set(true, forKey: "didTriggerTerminalAutomation")
+                let preferred = SpawnTerminal(rawValue: defaults.string(forKey: "terminalChoice") ?? "") ?? .iterm
+                AgentSpawner.triggerAutomationPrompt(preferred: preferred)
+            }
         }
 
         // Menu-bar-only: no Dock icon.
@@ -206,8 +222,8 @@ enum Dump {
             let cmd = AgentSpawner.shellCommand(promptFile: file)
             print("\n----- SHELL COMMAND -----")
             print(cmd)
-            print("\n----- APPLESCRIPT -----")
-            print(AgentSpawner.appleScript(shellCommand: cmd))
+            print("\n----- APPLESCRIPT (\(AgentSpawner.resolved(.iterm).title)) -----")
+            print(AgentSpawner.appleScript(for: AgentSpawner.resolved(.iterm), shellCommand: cmd))
             try? FileManager.default.removeItem(at: file)
         }
     }
@@ -221,5 +237,8 @@ enum Dump {
         print("effectiveMe      : '\(s.effectiveMe)'   (override if set, else gh login — empty here, no network)")
         print("hiddenTools      : \(s.hiddenTools.sorted())")
         print("visibleTools     : \(s.visibleTools.map { $0.rawValue })")
+        print("colorOverrides   : \(s.colorOverrides)")
+        print("terminalChoice   : '\(s.terminalChoice)' -> resolved \(AgentSpawner.resolved(s.terminal).title)")
+        print("tints            : \(ToolKind.allCases.map { "\($0.rawValue)=\(s.tint(for: $0).hexRGB)" })")
     }
 }

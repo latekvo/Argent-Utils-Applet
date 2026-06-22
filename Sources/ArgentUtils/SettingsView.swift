@@ -12,6 +12,7 @@ struct SettingsView: View {
             headerRow
             identitySection
             toolsSection
+            terminalSection
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -68,28 +69,54 @@ struct SettingsView: View {
 
     private var toolsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            sectionLabel("VISIBLE TOOLS")
+            sectionLabel("TOOLS — COLOR & VISIBILITY")
             ForEach(ToolKind.allCases) { kind in
-                Toggle(isOn: Binding(
-                    get: { !store.hiddenTools.contains(kind.rawValue) },
-                    set: { store.setTool(kind, visible: $0) }
-                )) {
-                    HStack(spacing: 8) {
-                        Image(systemName: kind.systemImage)
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 22, height: 22)
-                            .background(kind.tint)
-                            .clipShape(RoundedRectangle(cornerRadius: 5))
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(kind.title).font(.caption.bold())
-                            Text(kind.subtitle).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
-                        }
+                HStack(spacing: 8) {
+                    Image(systemName: kind.systemImage)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 22, height: 22)
+                        .background(store.tint(for: kind))
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(kind.title).font(.caption.bold())
+                        Text(kind.subtitle).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
                     }
+                    Spacer(minLength: 6)
+                    ColorPicker("", selection: Binding(
+                        get: { store.tint(for: kind) },
+                        set: { store.setTint($0, for: kind) }
+                    ), supportsOpacity: false)
+                        .labelsHidden()
+                        .help("Tint for \(kind.title)")
+                    Toggle("", isOn: Binding(
+                        get: { !store.hiddenTools.contains(kind.rawValue) },
+                        set: { store.setTool(kind, visible: $0) }
+                    ))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(store.tint(for: kind))
+                        .help("Show \(kind.title) in the grid")
                 }
-                .toggleStyle(.switch)
-                .tint(kind.tint)
             }
+        }
+    }
+
+    // MARK: Terminal
+
+    private var terminalSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionLabel("SPAWN TERMINAL")
+            Picker("", selection: $store.terminalChoice) {
+                ForEach(SpawnTerminal.allCases) { term in
+                    Text(term.title + (term.isInstalled ? "" : " (not installed)")).tag(term.rawValue)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            Text("SPAWN AGENT opens a new \(AgentSpawner.resolved(store.terminal).title) window. iTerm is used when installed; otherwise Terminal.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

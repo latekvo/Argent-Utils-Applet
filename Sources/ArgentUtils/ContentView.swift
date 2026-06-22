@@ -5,6 +5,7 @@ struct ContentView: View {
     @EnvironmentObject var store: Store
     @State private var query = ""
     @State private var showingSettings = false
+    @State private var showingReviewWizard = false
     @FocusState private var searchFocused: Bool
 
     var body: some View {
@@ -16,7 +17,6 @@ struct ContentView: View {
                 searchBar
                 if let err = store.error { errorBanner(err) }
                 toolGrid
-                ActionsPanel()
                 Divider()
                 resultsPane
             }
@@ -107,11 +107,20 @@ struct ContentView: View {
             ForEach(store.visibleTools) { kind in
                 ToolCard(
                     kind: kind,
+                    tint: store.tint(for: kind),
                     count: store.hasLoaded ? store.count(for: kind) : nil,
-                    selected: store.selected == kind
+                    selected: store.selected == kind && !showingReviewWizard
                 )
-                .onTapGesture { store.selected = kind }
+                .onTapGesture { showingReviewWizard = false; store.selected = kind }
             }
+            ActionCard(
+                systemImage: "checklist",
+                title: "Review PRs",
+                subtitle: "spawn a review agent",
+                tint: .pink,
+                selected: showingReviewWizard
+            )
+            .onTapGesture { showingReviewWizard = true }
         }
     }
 
@@ -120,7 +129,9 @@ struct ContentView: View {
     @ViewBuilder
     private var resultsPane: some View {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
-        if !trimmed.isEmpty, let n = Int(trimmed) {
+        if showingReviewWizard {
+            ReviewWizardView()
+        } else if !trimmed.isEmpty, let n = Int(trimmed) {
             ScrollView { lookupView(n) }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else if !trimmed.isEmpty {
@@ -158,22 +169,23 @@ struct ContentView: View {
     }
 
     private func checkRow(_ kind: ToolKind, on: Bool) -> some View {
-        HStack(spacing: 8) {
+        let tint = store.tint(for: kind)
+        return HStack(spacing: 8) {
             Image(systemName: kind.systemImage)
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(.white)
                 .frame(width: 22, height: 22)
-                .background(on ? kind.tint : Color.gray.opacity(0.35))
+                .background(on ? tint : Color.gray.opacity(0.35))
                 .clipShape(RoundedRectangle(cornerRadius: 5))
             Text(kind.title).font(.caption).foregroundStyle(on ? .primary : .secondary)
             Spacer()
             Image(systemName: on ? "checkmark.circle.fill" : "minus")
-                .foregroundStyle(on ? kind.tint : .secondary)
+                .foregroundStyle(on ? tint : .secondary)
         }
         .padding(7)
         .background(
             RoundedRectangle(cornerRadius: 6)
-                .fill(on ? kind.tint.opacity(0.12) : Color.gray.opacity(0.05))
+                .fill(on ? tint.opacity(0.12) : Color.gray.opacity(0.05))
         )
     }
 
@@ -183,9 +195,10 @@ struct ContentView: View {
         // first visible one, or an empty-state hint if the user hid them all.
         if let kind = store.visibleTools.contains(store.selected) ? store.selected : store.visibleTools.first {
             let items = store.items(for: kind)
+            let tint = store.tint(for: kind)
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Image(systemName: kind.systemImage).foregroundStyle(kind.tint)
+                    Image(systemName: kind.systemImage).foregroundStyle(tint)
                     Text(kind.title).font(.subheadline.bold())
                     Text("\(items.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     Spacer()
@@ -198,7 +211,7 @@ struct ContentView: View {
                     ScrollView {
                         VStack(spacing: 4) {
                             ForEach(items) { item in
-                                ResultRow(item: item, tint: kind.tint)
+                                ResultRow(item: item, tint: tint)
                             }
                         }
                     }
@@ -220,6 +233,7 @@ struct ContentView: View {
 
 private struct ToolCard: View {
     let kind: ToolKind
+    let tint: Color
     let count: Int?
     let selected: Bool
 
@@ -229,7 +243,7 @@ private struct ToolCard: View {
                 .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(.white)
                 .frame(width: 26, height: 26)
-                .background(kind.tint)
+                .background(tint)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             VStack(alignment: .leading, spacing: 1) {
                 Text(kind.title).font(.caption.bold()).lineLimit(1)
@@ -238,16 +252,55 @@ private struct ToolCard: View {
             Spacer(minLength: 2)
             Text(count.map(String.init) ?? "…")
                 .font(.callout.bold().monospacedDigit())
-                .foregroundStyle(kind.tint)
+                .foregroundStyle(tint)
         }
         .padding(7)
         .background(
             RoundedRectangle(cornerRadius: 8)
-                .fill(selected ? kind.tint.opacity(0.16) : Color.gray.opacity(0.08))
+                .fill(selected ? tint.opacity(0.16) : Color.gray.opacity(0.08))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(selected ? kind.tint : .clear, lineWidth: 1.2)
+                .stroke(selected ? tint : .clear, lineWidth: 1.2)
+        )
+        .contentShape(Rectangle())
+    }
+}
+
+// MARK: - Action card (grid entry that opens an action pane, e.g. Review PRs)
+
+private struct ActionCard: View {
+    let systemImage: String
+    let title: String
+    let subtitle: String
+    let tint: Color
+    let selected: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 26, height: 26)
+                .background(tint)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.caption.bold()).lineLimit(1)
+                Text(subtitle).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer(minLength: 2)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(selected ? tint : .secondary)
+        }
+        .padding(7)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(selected ? tint.opacity(0.16) : Color.gray.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(selected ? tint : .clear, lineWidth: 1.2)
         )
         .contentShape(Rectangle())
     }

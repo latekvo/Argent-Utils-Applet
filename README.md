@@ -29,10 +29,11 @@ as you type. Launch with `ARGENT_UTILS_PREFILL=<n>` to open pre-focused on a num
 
 ## Actions — Review PRs
 
-Below the tool grid sits an inline **Review PRs** wizard. Expand it, dial in a few
-choices, and hit **SPAWN AGENT** — it opens a fresh **iTerm2** window running
-`claude "<prompt>"` in `~/dev/argent`, a detached review session you watch and
-steer yourself. The choices are baked into the prompt:
+The grid carries a **Review PRs** card alongside the tools. Click it and the wizard
+opens where the PR lists normally render; dial in a few choices and hit **SPAWN
+AGENT** — it opens a fresh terminal window (iTerm if installed, else Terminal)
+running `claude "<prompt>"` in `~/dev/argent`, a detached review session you watch
+and steer yourself. The choices are baked into the prompt:
 
 - **Target** — *My PRs* (the resolved handle, see Settings) or *someone else's* (any handle).
 - **Scope** — *Review draft PRs* and *Review ready-for-review PRs* (both on by default).
@@ -56,11 +57,14 @@ for actions that make sense for whose PRs you're reviewing.
 The header **⚙︎** button (next to ↻ and ⏻) swaps the panel to a settings screen:
 
 - **GitHub username** — override the handle used by the "My …" tools and the Review
-  wizard. Blank = the `gh`-authenticated user (`viewer.login`).
-- **Visible tools** — a switch per tool to hide the ones you don't use; hidden tools
-  drop out of the grid and the reverse-lookup checklist.
+  wizard. Blank = the `gh`-authenticated user (`viewer.login`), resolved eagerly at
+  launch so it's the default everywhere.
+- **Tools — color & visibility** — a **color well** to retint each tool plus a switch
+  to hide it; hidden tools drop out of the grid and the reverse-lookup checklist.
+- **Spawn terminal** — which terminal SPAWN AGENT opens: **iTerm** or **Terminal**
+  (iTerm is the default when installed, Terminal the always-present fallback).
 
-Both persist across launches (UserDefaults, `com.ignacy.argent-utils`).
+All of it persists across launches (UserDefaults, `com.ignacy.argent-utils`).
 
 ### Definitions / heuristics (where it's deliberately loose)
 
@@ -94,6 +98,26 @@ swift run            # launches the menu-bar app (no Dock icon)
 ```
 
 Quit from the panel's ⏻ button, or `pkill ArgentUtils`.
+
+**First run from a terminal** (`swift run`, interactive TTY) offers to set itself up
+as a login daemon:
+
+```
+┌─ ArgentUtils setup ─────────────────────────────────────────
+│ Install as a background daemon? This will:
+│   • build + copy ArgentUtils.app to /Applications
+│   • add a per-user LaunchAgent so the wrench boots on login
+│   • start it now (it replaces this foreground instance)
+│   • ask macOS for permission to control your terminal (SPAWN)
+└──────────────────────────────────────────────────────────────
+Accept [y/N]
+```
+
+Accept and it runs `install-autostart.sh` for you (and the daemon takes over via the
+newest-wins singleton). The prompt is skipped when launched non-interactively
+(`open`, launchd) or once already installed. On first launch it also pokes the
+chosen terminal once so macOS shows the *"control iTerm/Terminal"* permission prompt
+up front, instead of on your first SPAWN.
 
 ### Double-clickable applet (recommended)
 
@@ -140,11 +164,13 @@ The `SETTINGS_DUMP` / `RENDER` checks read UserDefaults, so run them through the
 ```
 Sources/ArgentUtils/
   ArgentUtilsApp.swift   @main app + MenuBarExtra + headless dump/prompt/render modes
-  ContentView.swift      SwiftUI panel (tool grid + actions panel + result rows)
-  ReviewWizard.swift     Review-PRs wizard, prompt builder, iTerm2 spawner
-  SettingsView.swift     settings screen (username override + tool visibility)
+  ContentView.swift      SwiftUI panel (tool + Review-PRs grid, result rows)
+  ReviewWizard.swift     Review-PRs wizard, prompt builder, terminal spawner
+  SettingsView.swift     settings screen (username, tool color/visibility, terminal)
+  Daemon.swift           first-run login-daemon opt-in (TTY Accept [y/N])
   Render.swift           headless ImageRenderer snapshots for UI checks
   Store.swift            ObservableObject, ToolKind metadata, settings, row mapping
+  Color+Hex.swift        Color ↔ "#RRGGBB" for persisted tint overrides
   Models.swift           domain models, GraphQL queries, Filters, formatting
   GH.swift               gh CLI shell-out (GraphQL)
 ```

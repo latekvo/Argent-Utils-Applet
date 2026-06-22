@@ -133,9 +133,26 @@ struct ReviewConfig {
     }
 }
 
-// MARK: - Spawning a detached claude session in iTerm2
+// MARK: - Terminal choice
 
-/// Opens a brand-new iTerm2 window running `claude "<prompt>"`, fully detached
+/// Which terminal SPAWN AGENT drives. iTerm is preferred; Terminal.app is the
+/// always-present fallback.
+enum SpawnTerminal: String, CaseIterable, Identifiable {
+    case iterm, terminal
+    var id: String { rawValue }
+
+    var title: String { self == .iterm ? "iTerm" : "Terminal" }
+    var bundleID: String { self == .iterm ? "com.googlecode.iterm2" : "com.apple.Terminal" }
+    /// The name AppleScript addresses the app by.
+    var appName: String { self == .iterm ? "iTerm" : "Terminal" }
+    var isInstalled: Bool {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil
+    }
+}
+
+// MARK: - Spawning a detached claude session in a terminal
+
+/// Opens a brand-new terminal window running `claude "<prompt>"`, fully detached
 /// from this applet. The prompt is written to a temp file and read back with
 /// `$(cat …)` so we never have to wrestle a multi-line prompt through nested
 /// shell + AppleScript quoting.
@@ -143,6 +160,26 @@ enum AgentSpawner {
     /// The local checkout the agent works in. Personal-machine path; the `cd` is
     /// best-effort (`;`, not `&&`) so `claude` still starts if it ever moves.
     static let repoPath = "/Users/ignacylatka/dev/argent"
+
+    /// Resolve the terminal to actually drive: the preferred one if installed,
+    /// else the first installed alternative, else Terminal.app (always present).
+    static func resolved(_ preferred: SpawnTerminal) -> SpawnTerminal {
+        if preferred.isInstalled { return preferred }
+        return SpawnTerminal.allCases.first(where: { $0.isInstalled }) ?? .terminal
+    }
+
+    /// Proactively provoke the macOS "control <terminal>" automation prompt so the
+    /// user grants it up front instead of on first SPAWN. No-op once granted; runs
+    /// fire-and-forget so a pending prompt never blocks startup.
+    static func triggerAutomationPrompt(preferred: SpawnTerminal) {
+        let term = resolved(preferred)
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        proc.arguments = ["-e", "tell application \"\(term.appName)\" to get version"]
+        proc.standardOutput = Pipe()
+        proc.standardError = Pipe()
+        try? proc.run()   // don't wait — the prompt itself is the point
+    }
 
     enum SpawnError: LocalizedError {
         case write(String)
@@ -158,11 +195,12 @@ enum AgentSpawner {
         }
     }
 
-    /// Stage the prompt, open iTerm, run claude. Returns the prompt file URL.
+    /// Stage the prompt, open the terminal, run claude. Returns the prompt file URL.
     @discardableResult
-    static func spawn(_ prompt: String) throws -> URL {
+    static func spawn(_ prompt: String, terminal preferred: SpawnTerminal) throws -> URL {
+        let term = resolved(preferred)
         let file = try writePrompt(prompt)
-        try runOsascript(appleScript(shellCommand: shellCommand(promptFile: file)))
+        try runOsascript(appleScript(for: term, shellCommand: shellCommand(promptFile: file)))
         return file
     }
 
@@ -179,20 +217,31 @@ enum AgentSpawner {
         "cd \(shq(repoPath)) 2>/dev/null; claude \"$(cat \(shq(promptFile.path)))\""
     }
 
-    /// Wrap the shell command in an iTerm "open a new window and run this" script.
-    static func appleScript(shellCommand cmd: String) -> String {
+    /// Wrap the shell command in an "open a new window and run this" script for
+    /// the given terminal.
+    static func appleScript(for term: SpawnTerminal, shellCommand cmd: String) -> String {
         let esc = cmd
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
-        return """
-        tell application "iTerm"
-            activate
-            set w to (create window with default profile)
-            tell current session of w
-                write text "\(esc)"
+        switch term {
+        case .iterm:
+            return """
+            tell application "iTerm"
+                activate
+                set w to (create window with default profile)
+                tell current session of w
+                    write text "\(esc)"
+                end tell
             end tell
-        end tell
-        """
+            """
+        case .terminal:
+            return """
+            tell application "Terminal"
+                activate
+                do script "\(esc)"
+            end tell
+            """
+        }
     }
 
     /// POSIX single-quote a path for safe embedding in the shell command.
@@ -217,19 +266,20 @@ enum AgentSpawner {
     }
 }
 
-// MARK: - Actions panel (the wizard UI)
+// MARK: - Review wizard (shown in the results area)
 
-/// The fourth section: a "Review PRs" button that expands inline into a small
-/// wizard, then spawns a detached `claude` review session in iTerm2.
-struct ActionsPanel: View {
+/// The Review-PRs wizard: target, scope, depth and action toggles, then SPAWN.
+/// Rendered in the results pane when the "Review PRs" grid card is selected.
+struct ReviewWizardView: View {
     @EnvironmentObject var store: Store
     private let tint = Color.pink
 
-    @State private var expanded = false
+    /// The results area is shorter than the wizard, so it scrolls in the app.
+    /// `scrolls: false` (headless render only) drops the ScrollView so the
+    /// snapshot isn't blank (ImageRenderer can't render ScrollView content).
+    private let scrolls: Bool
+    init(scrolls: Bool = true) { self.scrolls = scrolls }
 
-    init(startExpanded: Bool = false) {
-        _expanded = State(initialValue: startExpanded)
-    }
     @State private var depthValue: Double = Double(ReviewDepth.deep.rawValue)
     @State private var targetIsMine = true
     @State private var username = ""
@@ -257,33 +307,15 @@ struct ActionsPanel: View {
     private var depth: ReviewDepth { config.depth }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if expanded { wizard } else { collapsedButton }
+        Group {
+            if scrolls { ScrollView { content } } else { content }
         }
-        .padding(8)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.06)))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.15), lineWidth: 1))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    // Collapsed: just the entry button.
-    private var collapsedButton: some View {
-        Button { withAnimation(.easeInOut(duration: 0.15)) { expanded = true } } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "checklist").foregroundStyle(tint)
-                Text("Review PRs").bold().foregroundStyle(.primary)
-                Spacer()
-                Image(systemName: "chevron.down").font(.caption2).foregroundStyle(.secondary)
-            }
-            .padding(.vertical, 4)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    // Expanded: the wizard.
-    private var wizard: some View {
+    private var content: some View {
         VStack(alignment: .leading, spacing: 10) {
-            header
+            titleRow
             targetRow
             scopeRow
             depthRow
@@ -291,19 +323,15 @@ struct ActionsPanel: View {
             spawnButton
             if let status { statusLine(status) }
         }
+        .padding(.trailing, 2)
     }
 
-    private var header: some View {
-        Button { withAnimation(.easeInOut(duration: 0.15)) { expanded = false } } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "checklist").foregroundStyle(tint)
-                Text("Review PRs").bold().foregroundStyle(.primary)
-                Spacer()
-                Image(systemName: "chevron.up").font(.caption2).foregroundStyle(.secondary)
-            }
-            .contentShape(Rectangle())
+    private var titleRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "checklist").foregroundStyle(tint)
+            Text("Review PRs").font(.subheadline.bold())
+            Spacer()
         }
-        .buttonStyle(.plain)
     }
 
     private var targetRow: some View {
@@ -406,7 +434,7 @@ struct ActionsPanel: View {
         }
         .buttonStyle(.plain)
         .disabled(!config.isValid)
-        .help("Open a new iTerm2 window running claude with this review prompt.")
+        .help("Open a new \(AgentSpawner.resolved(store.terminal).title) window running claude with this review prompt.")
     }
 
     private func statusLine(_ msg: String) -> some View {
@@ -418,11 +446,13 @@ struct ActionsPanel: View {
 
     private func spawn() {
         let cfg = config
-        status = "Launching iTerm…"
+        let preferred = store.terminal
+        let term = AgentSpawner.resolved(preferred)
+        status = "Launching \(term.title)…"
         Task.detached {
             do {
-                _ = try AgentSpawner.spawn(cfg.buildPrompt())
-                await MainActor.run { status = "Launched · \(Fmt.clock(Date()))" }
+                _ = try AgentSpawner.spawn(cfg.buildPrompt(), terminal: preferred)
+                await MainActor.run { status = "Launched \(term.title) · \(Fmt.clock(Date()))" }
             } catch {
                 let msg = (error as? LocalizedError)?.errorDescription ?? "\(error)"
                 await MainActor.run { status = "Failed: \(msg)" }
