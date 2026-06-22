@@ -66,6 +66,9 @@ struct ReviewConfig {
     var includeReady: Bool = true
     var specificPR: String = ""
 
+    /// The "final pass" escalation: a culminating full-E2E verdict pass. Off by default.
+    var finalPass: Bool = false
+
     /// The @handle whose PRs we go through.
     var authorHandle: String {
         if targetIsMine { return me.isEmpty ? "me" : me }
@@ -128,6 +131,10 @@ struct ReviewConfig {
         }
 
         blocks.append("Keep dispatching swarms until every PR you go through comes back clean. No AI attribution anywhere in git/GitHub — commits authored as me, no Co-Authored-By, no \"Generated with\" taglines.")
+
+        if finalPass {
+            blocks.append("Then, one last FULL E2E pass on the real built binaries with massive swarms of code-analysis agents. Provide super-concrete reproductions for any finding you manage to surface. Deliver a verdict on each PR:\n• If it turns out perfect — confirm every previously-raised issue is resolved, and if so, APPROVE it.\n• If there are only a few nitpicks — point them out and ask for them to be resolved, but still APPROVE.\n• If there are major blockers — leave the review as \"changes requested\".")
+        }
 
         return blocks.joined(separator: "\n\n")
     }
@@ -289,6 +296,7 @@ struct ReviewWizardView: View {
     @State private var includeDrafts = true
     @State private var includeReady = true
     @State private var specificPR = ""
+    @State private var finalPass = false
     @State private var status: String?
 
     private var config: ReviewConfig {
@@ -302,7 +310,8 @@ struct ReviewWizardView: View {
             replyToReviews: replyToReviews,
             includeDrafts: includeDrafts,
             includeReady: includeReady,
-            specificPR: specificPR)
+            specificPR: specificPR,
+            finalPass: finalPass)
     }
     private var depth: ReviewDepth { config.depth }
 
@@ -320,6 +329,7 @@ struct ReviewWizardView: View {
             scopeRow
             depthRow
             checkboxes
+            finalPassRow
             spawnButton
             if let status { statusLine(status) }
         }
@@ -415,6 +425,24 @@ struct ReviewWizardView: View {
             .help(config.canReplyToReviews ? "Reply \"Fixed in <hash>\" on threads others left." : "Only applies to your own PRs.")
         }
         .toggleStyle(.checkbox)
+    }
+
+    /// The escalation toggle — off by default, visually highlighted so it reads as
+    /// the special "go all the way" option. Appends a final E2E + verdict block.
+    private var finalPassRow: some View {
+        let highlight = Color.yellow
+        return Toggle(isOn: $finalPass) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles").foregroundStyle(.orange)
+                Text("Final E2E pass + verdict").font(.caption.bold())
+                Spacer(minLength: 0)
+            }
+        }
+        .toggleStyle(.checkbox)
+        .padding(7)
+        .background(RoundedRectangle(cornerRadius: 7).fill(highlight.opacity(finalPass ? 0.30 : 0.16)))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(.orange.opacity(finalPass ? 0.9 : 0.5), lineWidth: finalPass ? 1.4 : 1))
+        .help("One last full-E2E pass with big swarms: approve clean PRs, request changes on real blockers.")
     }
 
     private var spawnButton: some View {

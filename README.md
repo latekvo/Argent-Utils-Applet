@@ -43,6 +43,10 @@ and steer yourself. The choices are baked into the prompt:
 - **Mark clean PRs ready for review** — *(my PRs only)* flip perfectly-clean drafts to ready.
 - **Leave reviews** — *(others' PRs only)* post formal per-line reviews.
 - **Reply to others' review threads** — *(my PRs only)* answer and resolve open threads.
+- **✨ Final E2E pass + verdict** — *(highlighted, off by default)* appends a culminating
+  full-E2E pass on the real binaries with big swarms: APPROVE perfectly-clean PRs
+  (after confirming past issues are resolved), APPROVE-with-nitpicks when there are
+  only minor asks, or leave **changes requested** on real blockers.
 
 The action checkboxes grey out where they don't apply, so the prompt only ever asks
 for actions that make sense for whose PRs you're reviewing.

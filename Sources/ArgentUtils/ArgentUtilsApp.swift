@@ -213,7 +213,8 @@ enum Dump {
             replyToReviews: true,
             includeDrafts: !isSingle,
             includeReady: !isSingle,
-            specificPR: isSingle ? "337" : "")
+            specificPR: isSingle ? "337" : "",
+            finalPass: m.contains("final"))
         let label = isSingle ? "single PR #337" : (isUser ? "someone else's PRs" : "my PRs")
         print("== ReviewConfig: \(label) · depth=\(cfg.depth.title) ==\n")
         print("----- PROMPT -----")
