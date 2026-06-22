@@ -12,6 +12,7 @@ struct ContentView: View {
             searchBar
             if let err = store.error { errorBanner(err) }
             toolGrid
+            ActionsPanel()
             Divider()
             resultsPane
         }
@@ -42,7 +43,7 @@ struct ContentView: View {
             Button { Task { await store.refresh() } } label: {
                 Image(systemName: "arrow.clockwise")
             }.buttonStyle(.borderless).help("Refresh")
-            Button { NSApp.terminate(nil) } label: {
+            Button { QuitFlow.confirm() } label: {
                 Image(systemName: "power")
             }.buttonStyle(.borderless).help("Quit")
         }

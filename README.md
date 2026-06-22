@@ -27,6 +27,28 @@ it) and it instantly shows which of the six lists that number is on — a ✓/�
 plus what the number is (open PR/issue, author, draft/ready). Cache-only, so it reacts
 as you type. Launch with `ARGENT_UTILS_PREFILL=<n>` to open pre-focused on a number.
 
+## Actions — Review PRs
+
+Below the tool grid sits an inline **Review PRs** wizard. Expand it, dial in a few
+choices, and hit **SPAWN AGENT** — it opens a fresh **iTerm2** window running
+`claude "<prompt>"` in `~/dev/argent`, a detached review session you watch and
+steer yourself. The choices are baked into the prompt:
+
+- **Target** — *My PRs* (the authenticated `gh` user) or *someone else's* (a handle).
+- **Review depth** — a slider from a quick static read → standard swarm →
+  swarm + hard reproductions → full E2E with a second double-pass verification.
+- **Mark clean PRs ready for review** — *(my PRs only)* flip perfectly-clean drafts to ready.
+- **Leave reviews** — *(others' PRs only)* post formal per-line reviews.
+- **Reply to others' review threads** — *(my PRs only)* answer and resolve open threads.
+
+The three checkboxes grey out where they don't apply, so the prompt only ever asks
+for actions that make sense for whose PRs you're reviewing.
+
+> Preview the exact assembled prompt without launching anything:
+> ```bash
+> ARGENT_UTILS_PRINT_PROMPT=mine swift run   # or =user for the someone-else's variant
+> ```
+
 ### Definitions / heuristics (where it's deliberately loose)
 
 - **"only open"** — all PR tools query `states: OPEN`; the issues tool queries open issues.
@@ -97,8 +119,9 @@ ARGENT_UTILS_DUMP=1 swift run     # runs the real fetch+filter pipeline, prints 
 
 ```
 Sources/ArgentUtils/
-  ArgentUtilsApp.swift   @main app + MenuBarExtra + headless dump mode
-  ContentView.swift      SwiftUI panel (tool grid + dense result rows)
+  ArgentUtilsApp.swift   @main app + MenuBarExtra + headless dump/prompt modes
+  ContentView.swift      SwiftUI panel (tool grid + actions panel + result rows)
+  ReviewWizard.swift     Review-PRs wizard, prompt builder, iTerm2 spawner
   Store.swift            ObservableObject, ToolKind metadata, row mapping
   Models.swift           domain models, GraphQL queries, Filters, formatting
   GH.swift               gh CLI shell-out (GraphQL)

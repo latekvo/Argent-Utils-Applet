@@ -19,7 +19,9 @@ struct ArgentUtilsApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let env = ProcessInfo.processInfo.environment
-        let headless = env["ARGENT_UTILS_DUMP"] == "1" || env["ARGENT_UTILS_LOOKUP"] != nil
+        let headless = env["ARGENT_UTILS_DUMP"] == "1"
+            || env["ARGENT_UTILS_LOOKUP"] != nil
+            || env["ARGENT_UTILS_PRINT_PROMPT"] != nil
 
         // Singleton, newest-wins: a freshly launched GUI instance kills any older
         // ones so there's never more than one wrench. Skipped in headless self-test
@@ -37,6 +39,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if let lk = env["ARGENT_UTILS_LOOKUP"], let n = Int(lk) {
             Task { await Dump.lookup(n); exit(0) }
+        }
+        // Prompt/spawn self-test: print the assembled review prompt plus the exact
+        // shell command and AppleScript the SPAWN AGENT button would run, then exit.
+        // ARGENT_UTILS_PRINT_PROMPT=mine|user (default mine).
+        if let mode = env["ARGENT_UTILS_PRINT_PROMPT"] {
+            Dump.printPrompt(mode: mode); exit(0)
+        }
+    }
+}
+
+/// Quit confirmation. A real AppKit modal (SwiftUI's `.alert` is unreliable inside
+/// a `MenuBarExtra` window), so a stray click can never silently kill the wrench.
+enum QuitFlow {
+    @MainActor static func confirm() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Quit Argent Utils?"
+        alert.informativeText = "The menu-bar wrench disappears until you launch it again."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Cancel")   // default — Return cancels
+        alert.addButton(withTitle: "Quit")
+        if alert.runModal() == .alertSecondButtonReturn {
+            NSApp.terminate(nil)
         }
     }
 }
@@ -74,9 +99,10 @@ enum SingleInstance {
 enum Dump {
     static func run() async {
         do {
+            let me = try await API.fetchViewerLogin()
             let prs = try await API.fetchOpenPRs()
             let issues = try await API.fetchOpenIssues()
-            print("== open PRs: \(prs.count) · open issues: \(issues.count) ==\n")
+            print("== viewer: @\(me) · open PRs: \(prs.count) · open issues: \(issues.count) ==\n")
 
             let t1 = Filters.skillPRs(prs).sorted { $0.number > $1.number }
             print("TOOL 1 — SKILL.md PRs: \(t1.count)")
@@ -103,6 +129,18 @@ enum Dump {
             for i in t4 {
                 print("  #\(i.number) @\(i.author) [\(i.authorAssociation)] \(Fmt.days(i.createdAt))d \(i.commentCount)c labels:[\(i.labels.joined(separator: ","))]")
             }
+
+            let t5 = Filters.myApprovedPRs(prs, me: me).sorted { $0.number > $1.number }
+            print("\nTOOL 5 — my approved PRs: \(t5.count)")
+            for p in t5 {
+                print("  #\(p.number) @\(p.author) [\(p.isDraft ? "draft" : "ready")] \(Fmt.age(p.createdAt))")
+            }
+
+            let t6 = Filters.myUnaddressedReviewPRs(prs, me: me).sorted { $0.number > $1.number }
+            print("\nTOOL 6 — my PRs w/ unaddressed reviews: \(t6.count)")
+            for p in t6 {
+                print("  #\(p.number) @\(p.author) \(p.unaddressedThreads(me: me).count) open thread(s)")
+            }
         } catch {
             let msg = (error as? LocalizedError)?.errorDescription ?? "\(error)"
             print("DUMP ERROR: \(msg)")
@@ -112,10 +150,12 @@ enum Dump {
     /// Exercises the reverse-lookup path through the real Store logic.
     static func lookup(_ n: Int) async {
         do {
+            let me = try await API.fetchViewerLogin()
             let prs = try await API.fetchOpenPRs()
             let issues = try await API.fetchOpenIssues()
             let r = await MainActor.run { () -> LookupResult in
                 let s = Store()
+                s.me = me
                 s.prs = prs
                 s.issues = issues
                 s.hasLoaded = true
@@ -125,6 +165,32 @@ enum Dump {
             print("on lists: \(r.onLists.isEmpty ? "(none)" : r.onLists.map { $0.title }.joined(separator: ", "))")
         } catch {
             print("LOOKUP ERROR: \((error as? LocalizedError)?.errorDescription ?? "\(error)")")
+        }
+    }
+
+    /// Exercises the prompt builder + spawn-command assembly without any UI or
+    /// network. `mode` is "user" to preview the someone-else's-PRs variant,
+    /// anything else previews my-PRs. Mirrors the wizard's default toggle state.
+    static func printPrompt(mode: String) {
+        let isUser = mode.lowercased().hasPrefix("user")
+        let cfg = ReviewConfig(
+            depth: .max,
+            targetIsMine: !isUser,
+            username: isUser ? "someuser" : "",
+            me: "latekvo",
+            markReady: true,
+            leaveReviews: true,
+            replyToReviews: true)
+        print("== ReviewConfig: \(isUser ? "someone else's PRs" : "my PRs") · depth=\(cfg.depth.title) ==\n")
+        print("----- PROMPT -----")
+        print(cfg.buildPrompt())
+        if let file = try? AgentSpawner.writePrompt(cfg.buildPrompt()) {
+            let cmd = AgentSpawner.shellCommand(promptFile: file)
+            print("\n----- SHELL COMMAND -----")
+            print(cmd)
+            print("\n----- APPLESCRIPT -----")
+            print(AgentSpawner.appleScript(shellCommand: cmd))
+            try? FileManager.default.removeItem(at: file)
         }
     }
 }
