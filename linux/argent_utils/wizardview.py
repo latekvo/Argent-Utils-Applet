@@ -101,6 +101,20 @@ class WizardView(QWidget):
         for cb in (self.mark_ready, self.leave_reviews, self.reply):
             root.addWidget(cb)
 
+        # The "final pass" escalation — off by default, visually highlighted (amber)
+        # so it reads as the special "go all the way" option.
+        self.final_pass = QCheckBox("✨  Final E2E pass + verdict")
+        self.final_pass.setChecked(False)
+        self.final_pass.setStyleSheet(
+            "QCheckBox { font-weight: 600; padding: 6px; border: 1px solid #d8a200;"
+            " border-radius: 7px; background: rgba(255, 214, 0, 0.16); }"
+        )
+        self.final_pass.setToolTip(
+            "One last full-E2E pass with big swarms: approve clean PRs, "
+            "request changes on real blockers."
+        )
+        root.addWidget(self.final_pass)
+
         # Spawn
         self.spawn_btn = QPushButton("▶  SPAWN AGENT")
         self.spawn_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -147,6 +161,7 @@ class WizardView(QWidget):
             include_drafts=self.drafts.isChecked(),
             include_ready=self.ready.isChecked(),
             specific_pr=self.specific_pr.text(),
+            final_pass=self.final_pass.isChecked(),
         )
 
     def _sync(self) -> None:

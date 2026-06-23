@@ -66,6 +66,8 @@ class ReviewConfig:
     include_drafts: bool = True
     include_ready: bool = True
     specific_pr: str = ""
+    # The "final pass" escalation: a culminating full-E2E verdict pass. Off by default.
+    final_pass: bool = False
 
     def __post_init__(self) -> None:
         if not self.depth:
@@ -153,6 +155,8 @@ class ReviewConfig:
             blocks.append(blocks_src["reply"])
 
         blocks.append(blocks_src["trailer"])
+        if self.final_pass:
+            blocks.append(blocks_src["finalPass"])
         return "\n\n".join(blocks)
 
 

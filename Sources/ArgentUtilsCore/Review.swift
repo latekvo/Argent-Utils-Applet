@@ -51,10 +51,13 @@ public struct ReviewConfig {
     public var includeReady: Bool
     public var specificPR: String
 
+    /// The "final pass" escalation: a culminating full-E2E verdict pass. Off by default.
+    public var finalPass: Bool
+
     public init(depth: String = "", targetIsMine: Bool = true, username: String = "",
                 me: String = "", markReady: Bool = true, leaveReviews: Bool = true,
                 replyToReviews: Bool = true, includeDrafts: Bool = true,
-                includeReady: Bool = true, specificPR: String = "") {
+                includeReady: Bool = true, specificPR: String = "", finalPass: Bool = false) {
         self.depth = depth.isEmpty ? ReviewCatalog.defaultDepthID() : depth
         self.targetIsMine = targetIsMine
         self.username = username
@@ -65,6 +68,7 @@ public struct ReviewConfig {
         self.includeDrafts = includeDrafts
         self.includeReady = includeReady
         self.specificPR = specificPR
+        self.finalPass = finalPass
     }
 
     /// The @handle whose PRs we go through.
@@ -130,6 +134,7 @@ public struct ReviewConfig {
         if effLeaveReviews, let b = blocks["leaveReviews"] { out.append(b) }
         if effReplyToReviews, let b = blocks["reply"] { out.append(b) }
         if let trailer = blocks["trailer"] { out.append(trailer) }
+        if finalPass, let b = blocks["finalPass"] { out.append(b) }
 
         return out.joined(separator: "\n\n")
     }

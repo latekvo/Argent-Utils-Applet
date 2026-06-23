@@ -104,6 +104,7 @@ def run_print_prompt(mode: str) -> int:
         include_drafts=not is_single,
         include_ready=not is_single,
         specific_pr="337" if is_single else "",
+        final_pass="final" in m,
     )
     label = "single PR #337" if is_single else ("someone else's PRs" if is_user else "my PRs")
 
