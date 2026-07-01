@@ -161,6 +161,18 @@ public enum Fmt {
         f.dateFormat = "HH:mm"
         return f.string(from: date)
     }
+    /// A compact elapsed-duration label from a raw seconds count: "just now", "12m",
+    /// "1h 3m", "2d 4h". Used for how long an in-use device has been held.
+    public static func duration(_ seconds: TimeInterval) -> String {
+        let s = Int(max(0, seconds))
+        if s < 60 { return "just now" }
+        let m = (s / 60) % 60
+        let h = (s / 3600) % 24
+        let d = s / 86400
+        if d > 0 { return h > 0 ? "\(d)d \(h)h" : "\(d)d" }
+        if h > 0 { return m > 0 ? "\(h)h \(m)m" : "\(h)h" }
+        return "\(m)m"
+    }
 }
 
 // MARK: - GitHub API (GraphQL via the gh CLI)

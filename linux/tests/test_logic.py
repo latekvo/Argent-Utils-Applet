@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from argent_utils import review  # noqa: E402
-from argent_utils.models import Filters, OpenIssue, OpenPR, ReviewThread  # noqa: E402
+from argent_utils.models import Filters, Fmt, OpenIssue, OpenPR, ReviewThread  # noqa: E402
 from argent_utils.prref import parse_pr_ref  # noqa: E402
 from argent_utils.prtarget import PRTarget  # noqa: E402
 from argent_utils.store import Store  # noqa: E402
@@ -51,6 +51,17 @@ def test_filters_select_expected_numbers():
     assert [i.number for i in Filters.unaddressed_external_issues(issues)] == [201]
     assert [p.number for p in Filters.my_approved_prs(prs, "latekvo")] == [104]
     assert [p.number for p in Filters.my_unaddressed_review_prs(prs, "latekvo")] == [105]
+
+
+def test_fmt_duration_held_time():
+    # The in-use "held" label: sub-minute rounds to "just now", then m / h m / d h.
+    assert Fmt.duration(0) == "just now"
+    assert Fmt.duration(59) == "just now"
+    assert Fmt.duration(12 * 60) == "12m"
+    assert Fmt.duration(83 * 60) == "1h 23m"
+    assert Fmt.duration(3600) == "1h"
+    assert Fmt.duration(26 * 3600) == "1d 2h"
+    assert Fmt.duration(-5) == "just now"  # never negative
 
 
 def test_my_tools_empty_without_identity():

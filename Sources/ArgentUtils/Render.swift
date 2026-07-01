@@ -72,11 +72,19 @@ enum Render {
                 .frame(height: 560)
         case let s where s.hasPrefix("devices"):
             // Seed a synthetic device pool (and optionally sessions) so the Devices
-            // section can be eyeballed: an allocated iOS sim, a booting Android, a
-            // device under repair, and a free one. Natural height — no clipping.
+            // section can be eyeballed: allocated iOS + booting Android (with held
+            // durations), a device under repair, and free devices. Natural height.
+            // "devices-open" renders the section standalone with BOTH groups expanded
+            // (so the collapsed-by-default Free rows are visible); plain "devices"
+            // shows the whole panel with Free collapsed as it ships.
             let _ = seedProcessesIfNeeded(s, store: store)
             let _ = seedDeviceState(store)
-            ContentView()
+            if s.contains("open"), let ds = store.deviceState {
+                DevicesView(ds: ds, tracked: [],
+                            seedInUseExpanded: true, seedFreeExpanded: true)
+            } else {
+                ContentView()
+            }
         case let s where s.hasPrefix("natural"):
             // No forced height — the rendered PNG's height IS ContentView's natural
             // height, proving the content sizes to its content (what PopoverRoot caps).
@@ -111,19 +119,23 @@ enum Render {
     }
 
     /// Synthetic device-allocator state for `ARGENT_UTILS_RENDER=devices`.
+    /// In-use devices get an `allocatedAt` in the recent past so the "held" duration
+    /// renders; free devices populate the (collapsed-by-default) Free section.
     @MainActor
     private static func seedDeviceState(_ store: Store) {
+        let nowMs = Date().timeIntervalSince1970 * 1000
+        func ago(_ minutes: Double) -> Double { nowMs - minutes * 60_000 }
         store.deviceState = DeviceState(devices: [
             DeviceAllocation(
                 key: "ios:99AD", platform: "ios", name: "iPhone 16 Pro Max", version: "18.5",
                 apiVersion: "18", handle: "99AD1D87-DA5F", status: "ready",
                 owner: DeviceOwner(agentName: "bluesky e2e", ownerPid: 4242),
-                allocatedAt: nil, idleMs: 240_000, brokenReason: nil, repairLog: nil, format: "phone"),
+                allocatedAt: ago(12), idleMs: 240_000, brokenReason: nil, repairLog: nil, format: "phone"),
             DeviceAllocation(
                 key: "android:Pixel_6_API_34", platform: "android", name: "Pixel_6_API_34",
                 version: "14", apiVersion: "34", handle: "emulator-5554", status: "booting",
                 owner: DeviceOwner(agentName: "checkout flow", ownerPid: 4310),
-                allocatedAt: nil, idleMs: nil, brokenReason: nil, repairLog: nil, format: "phone"),
+                allocatedAt: ago(83), idleMs: nil, brokenReason: nil, repairLog: nil, format: "phone"),
             DeviceAllocation(
                 key: "appletv:ATV1", platform: "apple-tv", name: "Apple TV 4K", version: "17.5",
                 apiVersion: "17", handle: nil, status: "repairing",
@@ -133,6 +145,10 @@ enum Render {
                 key: "ios:FREE1", platform: "ios", name: "iPad Pro", version: "18.5",
                 apiVersion: "18", handle: nil, status: "free",
                 owner: nil, allocatedAt: nil, idleMs: nil, brokenReason: nil, repairLog: nil, format: "tablet"),
+            DeviceAllocation(
+                key: "android:Pixel_7_API_35", platform: "android", name: "Pixel_7_API_35",
+                version: "15", apiVersion: "35", handle: nil, status: "free",
+                owner: nil, allocatedAt: nil, idleMs: nil, brokenReason: nil, repairLog: nil, format: "phone"),
         ])
     }
 }

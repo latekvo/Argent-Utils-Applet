@@ -179,6 +179,22 @@ class Fmt:
         return int(max(0.0, (at - date).total_seconds()) // 86400)
 
     @staticmethod
+    def duration(seconds: float) -> str:
+        """Compact elapsed duration: "just now", "12m", "1h 3m", "2d 4h". Mirrors
+        Fmt.duration in the Swift core — how long an in-use device has been held."""
+        s = int(max(0.0, seconds))
+        if s < 60:
+            return "just now"
+        m = (s // 60) % 60
+        h = (s // 3600) % 24
+        d = s // 86400
+        if d > 0:
+            return f"{d}d {h}h" if h > 0 else f"{d}d"
+        if h > 0:
+            return f"{h}h {m}m" if m > 0 else f"{h}h"
+        return f"{m}m"
+
+    @staticmethod
     def skill_name(path: str) -> str:
         parts = [p for p in path.split("/") if p]
         return parts[-2] if len(parts) >= 2 else path

@@ -78,7 +78,9 @@ struct ContentView: View {
                 // only — they are hidden while Settings is open. Each also vanishes
                 // when empty.
                 if !store.processes.isEmpty { processList }
-                if let ds = store.deviceState, !ds.devices.isEmpty { devicesList(ds) }
+                if let ds = store.deviceState, !ds.devices.isEmpty {
+                    DevicesView(ds: ds, tracked: store.processes)
+                }
                 searchBar
                 if let err = store.error { errorBanner(err) }
                 toolGrid
@@ -169,36 +171,6 @@ struct ContentView: View {
             if await store.activate(proc) == .lost {
                 lostProcessIDs.insert(proc.id)
             }
-        }
-    }
-
-    // MARK: device allocator pool
-
-    private func devicesList(_ ds: DeviceState) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 5) {
-                Image(systemName: "iphone")
-                    .font(.system(size: 9)).foregroundStyle(.secondary)
-                Text("Devices").font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.secondary)
-                Text("\(ds.allocatedCount) in use · \(ds.freeCount) free")
-                    .font(.system(size: 10).monospacedDigit()).foregroundStyle(.secondary)
-                Spacer()
-            }
-            ForEach(sortedDevices(ds.devices)) { dev in
-                DeviceRow(dev: dev)
-            }
-        }
-        .padding(7)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.07)))
-    }
-
-    /// Busy devices first (what's in use is what you care about), then by platform+name.
-    private func sortedDevices(_ d: [DeviceAllocation]) -> [DeviceAllocation] {
-        d.sorted { a, b in
-            if a.isAllocated != b.isAllocated { return a.isAllocated }
-            if a.platform != b.platform { return a.platform < b.platform }
-            return (a.name ?? "") < (b.name ?? "")
         }
     }
 
@@ -552,8 +524,97 @@ private struct ProcessRow: View {
 
 // MARK: - Device-allocator row
 
+// MARK: - Device allocator pool
+
+/// The Devices section: in-use and free devices in two independently-collapsible
+/// groups. In-use is expanded by default (it's what you're watching); free starts
+/// collapsed. In-use rows track how long the device has been held and, on click,
+/// try to focus the terminal running the agent that holds it.
+struct DevicesView: View {
+    let ds: DeviceState
+    let tracked: [TrackedProcess]
+
+    @State private var inUseExpanded: Bool
+    @State private var freeExpanded: Bool
+
+    /// The seed params let the headless renderer snapshot either collapse state.
+    init(ds: DeviceState, tracked: [TrackedProcess],
+         seedInUseExpanded: Bool = true, seedFreeExpanded: Bool = false) {
+        self.ds = ds
+        self.tracked = tracked
+        _inUseExpanded = State(initialValue: seedInUseExpanded)
+        _freeExpanded = State(initialValue: seedFreeExpanded)
+    }
+
+    /// Within a section: by platform, then name. (Cross-section busy-first ordering
+    /// is gone — the split into In use / Free already conveys that.)
+    private func sorted(_ d: [DeviceAllocation]) -> [DeviceAllocation] {
+        d.sorted { a, b in
+            if a.platform != b.platform { return a.platform < b.platform }
+            return (a.name ?? "") < (b.name ?? "")
+        }
+    }
+
+    var body: some View {
+        let inUse = sorted(ds.devices.filter { $0.isAllocated })
+        let free = sorted(ds.devices.filter { !$0.isAllocated })
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 5) {
+                Image(systemName: "iphone").font(.system(size: 9)).foregroundStyle(.secondary)
+                Text("Devices").font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
+                Spacer()
+            }
+            if !inUse.isEmpty {
+                section("In use", color: .green, expanded: $inUseExpanded, devices: inUse)
+            }
+            if !free.isEmpty {
+                section("Free", color: .secondary, expanded: $freeExpanded, devices: free)
+            }
+        }
+        .padding(7)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.07)))
+    }
+
+    /// One collapsible group: a tappable header (chevron + title + count pill) and,
+    /// when expanded, its device rows.
+    @ViewBuilder
+    private func section(_ title: String, color: Color, expanded: Binding<Bool>,
+                         devices: [DeviceAllocation]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) { expanded.wrappedValue.toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: expanded.wrappedValue ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(.secondary).frame(width: 9)
+                    Text(title.uppercased()).font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary).kerning(0.5)
+                    Text("\(devices.count)").font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(color == .secondary ? Color.secondary : color)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Capsule().fill((color == .secondary ? Color.gray : color).opacity(0.15)))
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if expanded.wrappedValue {
+                ForEach(devices) { dev in
+                    DeviceRow(dev: dev, tracked: tracked)
+                }
+            }
+        }
+    }
+}
+
 private struct DeviceRow: View {
     let dev: DeviceAllocation
+    var tracked: [TrackedProcess] = []
+
+    /// Clickable when an owner PID exists to resolve a terminal for. The actual
+    /// (possibly-failing) tty lookup runs on click, never during layout.
+    private var focusable: Bool { dev.owner?.ownerPid != nil }
 
     private var platformIcon: String {
         switch dev.platform {
@@ -602,6 +663,11 @@ private struct DeviceRow: View {
                 detailLine
             }
             Spacer(minLength: 4)
+            if focusable {
+                Image(systemName: "macwindow")
+                    .font(.system(size: 9)).foregroundStyle(.secondary.opacity(0.7))
+                    .help("Focus the terminal running \(dev.owner?.agentName ?? "this agent")")
+            }
             Text(statusBadge.text)
                 .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(statusBadge.color)
@@ -610,6 +676,8 @@ private struct DeviceRow: View {
         }
         .padding(6)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.06)))
+        .contentShape(Rectangle())
+        .onTapGesture { if focusable { DeviceFocus.focus(dev, tracked: tracked) } }
     }
 
     @ViewBuilder
@@ -618,8 +686,16 @@ private struct DeviceRow: View {
             label(dev.brokenReason.map { "repair: \($0)" } ?? "repair dispatched",
                   "wrench.and.screwdriver", .purple)
         } else if dev.isAllocated, let owner = dev.owner?.agentName {
-            HStack(spacing: 4) {
+            HStack(spacing: 5) {
                 label(owner, "person.fill", platformTint)
+                // How long this device has been held — ticks live via TimelineView so
+                // it advances without waiting on a device-state change.
+                if let started = dev.allocatedAt {
+                    TimelineView(.periodic(from: Date(), by: 30)) { ctx in
+                        label("held \(Fmt.duration(ctx.date.timeIntervalSince1970 - started / 1000))",
+                              "clock", .secondary)
+                    }
+                }
                 if let idle = idleText {
                     Text(idle).font(.system(size: 9)).foregroundStyle(.secondary)
                 }

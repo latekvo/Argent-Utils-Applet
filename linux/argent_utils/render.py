@@ -13,6 +13,7 @@ fetches real data first; otherwise it uses a small synthetic fixture.
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 from PySide6.QtWidgets import QApplication
@@ -47,22 +48,28 @@ def _fixture(store: Store) -> None:
 
 
 def _device_fixture(store: Store) -> None:
-    """Synthetic device-allocator pool so the Devices section can be eyeballed."""
+    """Synthetic device-allocator pool so the Devices section can be eyeballed.
+    In-use devices carry a recent `allocatedAt` (epoch ms) so the held duration shows."""
+    now_ms = time.time() * 1000
     store.device_state = {
         "updatedAt": "now",
         "daemonPid": 4242,
         "devices": [
             {"key": "ios:99AD", "platform": "ios", "name": "iPhone 16 Pro Max",
              "version": "18.5", "handle": "99AD1D87-DA5F", "status": "ready",
-             "owner": {"agentName": "bluesky e2e", "ownerPid": 4242}, "idleMs": 240000},
+             "owner": {"agentName": "bluesky e2e", "ownerPid": 4242},
+             "allocatedAt": now_ms - 12 * 60000, "idleMs": 240000},
             {"key": "android:Pixel_6_API_34", "platform": "android", "name": "Pixel_6_API_34",
              "version": "14", "handle": "emulator-5554", "status": "booting",
-             "owner": {"agentName": "checkout flow", "ownerPid": 4310}},
+             "owner": {"agentName": "checkout flow", "ownerPid": 4310},
+             "allocatedAt": now_ms - 83 * 60000},
             {"key": "android:Pixel_3a_API_34", "platform": "android", "name": "Pixel_3a_API_34",
              "version": "14", "handle": None, "status": "repairing",
              "owner": {"agentName": "repair", "ownerPid": None}, "brokenReason": "boot timeout"},
             {"key": "ios:FREE1", "platform": "ios", "name": "iPhone 15", "version": "17.5",
              "handle": None, "status": "free", "owner": None},
+            {"key": "android:FREE2", "platform": "android", "name": "Pixel_7_API_35",
+             "version": "15", "handle": None, "status": "free", "owner": None},
         ],
     }
 

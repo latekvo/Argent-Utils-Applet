@@ -25,7 +25,10 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QUrl
 
+import time
+
 from . import core
+from .models import Fmt
 from .settingsview import SettingsView
 from .store import Store, tool_by_id
 from .widgets import (
@@ -87,9 +90,14 @@ def _device_detail(dev: dict, allocated: bool) -> str:
         return f"repair: {reason}" if reason else "repair dispatched"
     owner = dev.get("owner") or {}
     if allocated and owner.get("agentName"):
+        parts = [owner["agentName"]]
+        started = dev.get("allocatedAt")
+        if started:
+            parts.append(f"held {Fmt.duration(time.time() - started / 1000)}")
         idle = dev.get("idleMs")
-        idle_txt = f" · idle {int(idle / 60000)}m" if idle and idle > 60000 else ""
-        return f"{owner['agentName']}{idle_txt}"
+        if idle and idle > 60000:
+            parts.append(f"idle {int(idle / 60000)}m")
+        return " · ".join(parts)
     return dev.get("handle") or "available"
 
 
@@ -102,6 +110,10 @@ class Panel(QWidget):
         self.store = store
         self._show_settings = False
         self._active_action: str | None = None  # None | "review" | "conflicts" | "audit"
+        # Devices section: In use expanded, Free collapsed by default. Persisted on the
+        # instance so a poll-driven rebuild doesn't reset the user's collapse choice.
+        self._inuse_expanded = True
+        self._free_expanded = False
 
         self.setWindowFlags(
             Qt.WindowType.Tool
@@ -144,6 +156,12 @@ class Panel(QWidget):
         self._device_timer.timeout.connect(self.store.refresh_device_state)
         self._device_timer.start(8000)
         self.store.refresh_device_state()
+
+        # Advance the "held" durations on in-use devices even when the pool itself
+        # hasn't changed (allocatedAt is fixed; the elapsed time is not).
+        self._duration_timer = QTimer(self)
+        self._duration_timer.timeout.connect(self._rebuild_devices)
+        self._duration_timer.start(30000)
 
         self._rebuild_grid()
         self._rebuild_devices()
@@ -362,24 +380,50 @@ class Panel(QWidget):
 
         from . import deviceallocator
 
-        allocated = deviceallocator.allocated_count(state)
-        free = deviceallocator.free_count(state)
         head = QHBoxLayout()
         title = QLabel("📱 Devices")
         title.setStyleSheet("color: palette(mid); font-weight: 700; font-size: 10px;")
         head.addWidget(title)
-        counts = QLabel(f"{allocated} in use · {free} free")
-        counts.setStyleSheet("color: palette(mid); font-family: monospace; font-size: 10px;")
-        head.addWidget(counts)
         head.addStretch(1)
         self.devices_col.addLayout(head)
 
-        # Busy devices first, then by platform + name.
+        # Within a section: by platform, then name.
         def sort_key(d: dict):
-            return (not deviceallocator.is_allocated(d), d.get("platform", ""), d.get("name") or "")
+            return (d.get("platform", ""), d.get("name") or "")
 
-        for dev in sorted(devices, key=sort_key):
-            self.devices_col.addWidget(self._device_row(dev))
+        in_use = sorted((d for d in devices if deviceallocator.is_allocated(d)), key=sort_key)
+        free = sorted((d for d in devices if not deviceallocator.is_allocated(d)), key=sort_key)
+
+        if in_use:
+            self._device_section("In use", "#34C759", self._inuse_expanded,
+                                 in_use, self._toggle_inuse)
+        if free:
+            self._device_section("Free", "gray", self._free_expanded,
+                                 free, self._toggle_free)
+
+    def _toggle_inuse(self) -> None:
+        self._inuse_expanded = not self._inuse_expanded
+        self._rebuild_devices()
+
+    def _toggle_free(self) -> None:
+        self._free_expanded = not self._free_expanded
+        self._rebuild_devices()
+
+    def _device_section(self, title: str, color: str, expanded: bool,
+                        devices: list[dict], toggle_slot) -> None:
+        header = QToolButton()
+        header.setText(f"{'▾' if expanded else '▸'}  {title.upper()}    {len(devices)}")
+        header.setCursor(Qt.CursorShape.PointingHandCursor)
+        header.setStyleSheet(
+            "QToolButton { border: none; color: palette(mid); font-weight: 700;"
+            " font-size: 9px; padding: 2px 0; text-align: left; }"
+            "QToolButton:hover { color: palette(text); }"
+        )
+        header.clicked.connect(toggle_slot)
+        self.devices_col.addWidget(header)
+        if expanded:
+            for dev in devices:
+                self.devices_col.addWidget(self._device_row(dev))
 
     def _device_row(self, dev: dict) -> QWidget:
         from . import deviceallocator
