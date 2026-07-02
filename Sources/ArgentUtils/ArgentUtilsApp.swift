@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             || env["ARGENT_UTILS_TRACK_TEST"] == "1"
             || env["ARGENT_UTILS_DEVICE_DUMP"] == "1"
             || env["ARGENT_UTILS_AUTOFIX_POLL"] == "1"
+            || env["ARGENT_UTILS_APIWATCH_SCAN"] == "1"
 
         // Singleton, newest-wins: a freshly launched GUI instance kills any older
         // ones so there's never more than one wrench. Skipped in headless self-test
@@ -93,6 +94,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // and the exact prompts it would spawn — without opening any terminal.
         if env["ARGENT_UTILS_AUTOFIX_POLL"] == "1" {
             Task { await Dump.autofixPoll(); exit(0) }
+        }
+        // API-error watcher dry-run: dump every terminal session's last lines and show
+        // which ones the watcher would nudge — WITHOUT sending anything.
+        if env["ARGENT_UTILS_APIWATCH_SCAN"] == "1" {
+            Dump.apiWatchScan(); exit(0)
         }
     }
 }
@@ -298,6 +304,21 @@ enum Dump {
             print(AgentSpawner.appleScript(for: AgentSpawner.resolved(.iterm), shellCommand: cmd))
             try? FileManager.default.removeItem(at: file)
         }
+    }
+
+    /// API-error watcher dry-run: read every terminal session's last visible lines,
+    /// print which the watcher would nudge, and send NOTHING. Safe to run anytime.
+    static func apiWatchScan() {
+        let sessions = ApiErrorWatcher.dumpSessions()
+        print("== api-error scan: \(sessions.count) terminal session(s) ==\n")
+        for s in sessions {
+            let hit = ApiErrorMatch.looksLikeApiError(s.tail)
+            let last = s.tail.split(whereSeparator: \.isNewline).last.map(String.init) ?? ""
+            print("  \(hit ? "⚠️ MATCH" : "  ok   ")  \(s.tty)   last: \(last.prefix(70))")
+        }
+        let matches = sessions.filter { ApiErrorMatch.looksLikeApiError($0.tail) }
+        print("\n\(matches.count) session(s) would receive: "
+            + "\"\(ApiErrorWatcher.continueMessage)\"  (dry-run — nothing sent)")
     }
 
     /// Auto-fix monitor self-test: fetch my open PRs in the target repo (real gh),

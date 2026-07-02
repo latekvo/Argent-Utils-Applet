@@ -67,6 +67,15 @@ final class Store: ObservableObject {
     /// the top-of-panel status pill; freshness (`isLive`) decides active vs. offline.
     @Published var autofixStatus: AutofixStatus?
 
+    /// Whether the Claude-API-error terminal watcher is on: it nudges any agent that
+    /// stalls on a transient server error to continue. Persisted; kicks a scan on enable.
+    @Published var apiWatchEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(apiWatchEnabled, forKey: Keys.apiWatchEnabled)
+            if apiWatchEnabled && !oldValue { Task { await runApiErrorScanOnce() } }
+        }
+    }
+
     /// The dispatched agent sessions shown in the ongoing-processes list. Persisted
     /// so the list survives an applet restart — the tty/window/sentinel handles are
     /// OS-level and outlive this process.
@@ -84,6 +93,8 @@ final class Store: ObservableObject {
         static let autofixFingerprints = "autofixFingerprints"
         static let autofixConflicts = "autofixConflictsHandled"
         static let autofixReviews = "autofixReviewsHandled"
+        static let apiWatchEnabled = "apiWatchEnabled"
+        static let apiWatchContinues = "apiWatchContinues"
     }
 
     /// The handle to treat as "me": the user's override if set, else the gh login.
@@ -131,6 +142,7 @@ final class Store: ObservableObject {
         // Default ON (absent key ⇒ true): the pill only lights up on a live heartbeat,
         // so defaulting on can't falsely claim "active" when no monitor is running.
         prAutofixEnabled = defaults.object(forKey: Keys.prAutofixEnabled) as? Bool ?? true
+        apiWatchEnabled = defaults.object(forKey: Keys.apiWatchEnabled) as? Bool ?? true
         processes = Store.loadProcesses()
         if hiddenTools.contains(selected.rawValue),
            let first = ToolKind.allCases.first(where: { !hiddenTools.contains($0.rawValue) }) {
@@ -149,10 +161,12 @@ final class Store: ObservableObject {
             || env["ARGENT_UTILS_TRACK_TEST"] == "1"
             || env["ARGENT_UTILS_DEVICE_DUMP"] == "1"
             || env["ARGENT_UTILS_AUTOFIX_POLL"] == "1"
+            || env["ARGENT_UTILS_APIWATCH_SCAN"] == "1"
         if !headless {
             startAutoRefresh()
             startProcessPoll()
             startAutofixMonitor()
+            startApiErrorWatcher()
             Task { await fetchMe() }
             Task { await refreshDeviceState() }
             Task { await refreshAllocatorInstall() }
@@ -393,6 +407,53 @@ final class Store: ObservableObject {
         let keyed = Dictionary(uniqueKeysWithValues: fps.map { (String($0.key), $0.value) })
         if let data = try? JSONEncoder().encode(keyed) {
             UserDefaults.standard.set(data, forKey: Keys.autofixFingerprints)
+        }
+    }
+
+    // MARK: Claude API-error terminal watcher
+
+    /// How often to scan terminals for a stalled agent. 20s by default; env-overridable.
+    static var apiWatchInterval: TimeInterval {
+        let secs = ProcessInfo.processInfo.environment["ARGENT_UTILS_APIWATCH_SECS"].flatMap(Double.init)
+        return max(5, secs ?? 20)
+    }
+    /// Don't re-nudge the same tty within this window (avoids spamming while the error
+    /// text is still on screen before the agent produces new output).
+    static let apiWatchCooldown: TimeInterval = 120
+    private var apiWatchTask: Task<Void, Never>?
+    private var apiErrorCooldown: [String: Date] = [:]
+
+    /// Count of nudges sent, for the Settings display.
+    var apiWatchContinues: Int {
+        get { UserDefaults.standard.integer(forKey: Keys.apiWatchContinues) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.apiWatchContinues) }
+    }
+
+    private func startApiErrorWatcher() {
+        guard apiWatchTask == nil else { return }
+        apiWatchTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.runApiErrorScanOnce()
+                let ns = UInt64(Store.apiWatchInterval * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: ns)
+            }
+        }
+    }
+
+    /// One scan: read every terminal's last visible lines and, for any showing a Claude
+    /// API error (outside its cooldown), send the continue nudge to that exact session.
+    func runApiErrorScanOnce() async {
+        guard apiWatchEnabled else { return }
+        let sessions = await Task.detached(priority: .utility) { ApiErrorWatcher.dumpSessions() }.value
+        let now = Date()
+        for s in sessions where ApiErrorMatch.looksLikeApiError(s.tail) {
+            if let last = apiErrorCooldown[s.tty], now.timeIntervalSince(last) < Store.apiWatchCooldown {
+                continue
+            }
+            apiErrorCooldown[s.tty] = now
+            let tty = s.tty
+            await Task.detached(priority: .userInitiated) { ApiErrorWatcher.sendContinue(tty: tty) }.value
+            apiWatchContinues += 1
         }
     }
 

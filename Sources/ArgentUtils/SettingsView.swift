@@ -13,6 +13,7 @@ struct SettingsView: View {
             headerRow
             identitySection
             autofixSection
+            apiWatchSection
             toolsSection
             terminalSection
             allocatorSection
@@ -55,6 +56,25 @@ struct SettingsView: View {
         Text("When on, an agent watches your open PRs and automatically resolves merge conflicts and addresses new review threads. Turning it off pauses agent dispatch.")
             .font(.caption2).foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    // MARK: Claude API-error watcher
+
+    private var apiWatchSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionLabel("CLAUDE API ERRORS")
+            Toggle(isOn: $store.apiWatchEnabled) {
+                Text("Auto-continue agents on API errors").font(.caption)
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            Text("Watches every iTerm/Terminal session; when a Claude API error shows up "
+                 + "(e.g. \u{201C}529 Overloaded\u{201D}), it sends \u{201C}\(ApiErrorWatcher.continueMessage)\u{201D} "
+                 + "so a stalled agent resumes on its own."
+                 + (store.apiWatchContinues > 0 ? "  Continued \(store.apiWatchContinues)× so far." : ""))
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var headerRow: some View {

@@ -189,6 +189,16 @@ let u = AutofixDiff.compute(prior: unk, now: [snap(1, mergeable: "UNKNOWN")])
 assert(u.events.isEmpty && u.fingerprints[1]?.mergeable == "MERGEABLE", "UNKNOWN carries prior forward")
 print("autofix diff assertions passed")
 
+// ---- Claude API-error detection (terminal auto-continue) ----
+section("api-error match")
+assert(ApiErrorMatch.looksLikeApiError("⏺ API Error: 529 Overloaded. If it persists, check https://status.claude.com."))
+assert(ApiErrorMatch.looksLikeApiError("API Error: 500 Internal Server Error"))
+assert(ApiErrorMatch.looksLikeApiError("something API error, see status.claude.com for details"))
+assert(!ApiErrorMatch.looksLikeApiError("● Running tests… 47 passed"))
+assert(!ApiErrorMatch.looksLikeApiError("git push origin main"))
+assert(!ApiErrorMatch.looksLikeApiError(""))
+print("api-error match assertions passed")
+
 if ProcessInfo.processInfo.environment["ARGENT_UTILS_DUMP"] == "1" {
     section("live gh dump (cross-check vs Python)")
     let viewer = try await API.fetchViewerLogin()
