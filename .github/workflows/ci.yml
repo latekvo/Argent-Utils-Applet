@@ -89,3 +89,5 @@ jobs:
         run: node test/integration.mjs
       - name: MCP protocol (handshake/tools/alwaysLoad/allocate)
         run: node test/mcp-protocol.mjs
+      - name: Agent-kill on prompt injection
+        run: node test/agent-kill.mjs
