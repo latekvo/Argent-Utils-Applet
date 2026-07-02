@@ -124,8 +124,7 @@ enum Render {
     private static func seedAutofix(_ store: Store) {
         store.prAutofixEnabled = true
         store.autofixStatus = AutofixStatus(
-            updatedAt: Date(), enabled: true, watching: 28,
-            conflictsResolved: 3, reviewsAddressed: 2)
+            updatedAt: Date(), watching: 28, conflictsHandled: 3, reviewsHandled: 2)
     }
 
     /// Synthetic device-allocator state for `ARGENT_UTILS_RENDER=devices`.

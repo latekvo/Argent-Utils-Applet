@@ -54,17 +54,17 @@ final class Store: ObservableObject {
     @Published var terminalChoice: String {
         didSet { UserDefaults.standard.set(terminalChoice, forKey: Keys.terminalChoice) }
     }
-    /// User intent for the external PR auto-fix monitor. Persisted, and mirrored to the
-    /// monitor's control file so toggling it off actually pauses agent dispatch.
+    /// Whether the in-process PR auto-fix monitor is on. Persisted; when turned on we
+    /// kick an immediate poll rather than waiting for the next tick.
     @Published var prAutofixEnabled: Bool {
         didSet {
             UserDefaults.standard.set(prAutofixEnabled, forKey: Keys.prAutofixEnabled)
-            Autofix.writeEnabled(prAutofixEnabled)
+            if prAutofixEnabled && !oldValue { Task { await runAutofixPollOnce() } }
         }
     }
 
-    /// Latest heartbeat from the auto-fix monitor (nil until one is read). Drives the
-    /// top-of-panel status pill; freshness (`isLive`) decides active vs. offline.
+    /// Latest state from the auto-fix monitor's own poll (nil until the first). Drives
+    /// the top-of-panel status pill; freshness (`isLive`) decides active vs. offline.
     @Published var autofixStatus: AutofixStatus?
 
     /// The dispatched agent sessions shown in the ongoing-processes list. Persisted
@@ -81,6 +81,9 @@ final class Store: ObservableObject {
         static let terminalChoice = "terminalChoice"
         static let processes = "trackedProcesses"
         static let prAutofixEnabled = "prAutofixEnabled"
+        static let autofixFingerprints = "autofixFingerprints"
+        static let autofixConflicts = "autofixConflictsHandled"
+        static let autofixReviews = "autofixReviewsHandled"
     }
 
     /// The handle to treat as "me": the user's override if set, else the gh login.
@@ -145,21 +148,15 @@ final class Store: ObservableObject {
             || env["ARGENT_UTILS_SETTINGS_DUMP"] == "1"
             || env["ARGENT_UTILS_TRACK_TEST"] == "1"
             || env["ARGENT_UTILS_DEVICE_DUMP"] == "1"
+            || env["ARGENT_UTILS_AUTOFIX_POLL"] == "1"
         if !headless {
             startAutoRefresh()
             startProcessPoll()
+            startAutofixMonitor()
             Task { await fetchMe() }
             Task { await refreshDeviceState() }
             Task { await refreshAllocatorInstall() }
-            refreshAutofixStatus()
         }
-    }
-
-    /// Re-read the auto-fix monitor's heartbeat file (cheap local read). Publishes
-    /// only on change to avoid needless redraws.
-    func refreshAutofixStatus() {
-        let next = Autofix.readStatus()
-        if next != autofixStatus { autofixStatus = next }
     }
 
     // MARK: device allocator
@@ -293,13 +290,118 @@ final class Store: ObservableObject {
         processes.removeAll { $0.id == id }
     }
 
+    // MARK: PR auto-fix monitor
+
+    /// How often the monitor polls GitHub. 3 min by default; override for testing.
+    static var autofixPollInterval: TimeInterval {
+        let secs = ProcessInfo.processInfo.environment["ARGENT_UTILS_AUTOFIX_SECS"].flatMap(Double.init)
+        return max(30, secs ?? 3 * 60)
+    }
+    private var autofixMonitorTask: Task<Void, Never>?
+
+    private func startAutofixMonitor() {
+        guard autofixMonitorTask == nil else { return }
+        autofixMonitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.runAutofixPollOnce()
+                let ns = UInt64(Store.autofixPollInterval * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: ns)
+            }
+        }
+    }
+
+    /// One poll: fetch my open PRs, diff against saved fingerprints, and dispatch an
+    /// agent for each PR that just gained a conflict or new review work. No-op when
+    /// the feature is off or our login isn't known yet.
+    func runAutofixPollOnce() async {
+        guard prAutofixEnabled else { return }
+        if me.isEmpty { await fetchMe() }
+        guard !effectiveMe.isEmpty else { return }
+        let (owner, repo) = coreRepo
+        let snaps: [PRSnapshot]
+        do {
+            snaps = try await AutofixMonitor.fetchSnapshots(owner: owner, repo: repo, me: effectiveMe)
+        } catch {
+            return   // transient gh/network error — leave state as-is, retry next tick
+        }
+        let (events, fingerprints) = AutofixDiff.compute(prior: loadAutofixFingerprints(), now: snaps)
+        for event in events { await dispatchAutofix(event) }
+        saveAutofixFingerprints(fingerprints)
+        autofixStatus = AutofixStatus(
+            updatedAt: Date(), watching: snaps.count,
+            conflictsHandled: autofixConflictsHandled, reviewsHandled: autofixReviewsHandled)
+    }
+
+    /// Spawn the appropriate action-button agent for a detected transition and track
+    /// it, mirroring exactly what the Resolve-conflicts / Review wizards do (Deep depth,
+    /// don't-mark-ready / no-formal-review / reply-"Fixed in <hash>").
+    private func dispatchAutofix(_ event: AutofixEvent) async {
+        let kind: String
+        let snap: PRSnapshot
+        let prompt: String
+        let label: String
+        switch event {
+        case .conflict(let s):
+            kind = "conflicts"; snap = s
+            prompt = ConflictConfig(target: .specific, me: effectiveMe,
+                                    specificPR: String(s.number)).buildPrompt()
+            label = "Auto · Resolve · #\(s.number)"
+        case .review(let s):
+            kind = "review"; snap = s
+            prompt = ReviewConfig(depth: "deep", target: .specific, me: effectiveMe,
+                                  markReady: false, leaveReviews: false, replyToReviews: true,
+                                  specificPR: String(s.number)).buildPrompt()
+            label = "Auto · Review · #\(s.number)"
+        }
+        // Never pile a second agent on a PR that already has one running.
+        if processes.contains(where: { $0.prURL == snap.url && !$0.done }) { return }
+        let preferred = terminal
+        do {
+            let result = try await Task.detached(priority: .userInitiated) {
+                try AgentSpawner.spawn(prompt, terminal: preferred)
+            }.value
+            track(kind: kind, label: label, prURL: snap.url, result: result)
+            if case .conflict = event { autofixConflictsHandled += 1 } else { autofixReviewsHandled += 1 }
+        } catch {
+            // Spawn failed (e.g. terminal-automation permission not granted). Skip; the
+            // fingerprint is still recorded, so it won't loop — the user can trigger the
+            // action card manually.
+        }
+    }
+
+    private var coreRepo: (owner: String, repo: String) {
+        let cfg = try? CoreAssets.config()
+        return (cfg?.owner ?? "software-mansion", cfg?.repo ?? "argent")
+    }
+
+    // Persisted so restarts don't re-dispatch, and the pill's counts survive.
+    private var autofixConflictsHandled: Int {
+        get { UserDefaults.standard.integer(forKey: Keys.autofixConflicts) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.autofixConflicts) }
+    }
+    private var autofixReviewsHandled: Int {
+        get { UserDefaults.standard.integer(forKey: Keys.autofixReviews) }
+        set { UserDefaults.standard.set(newValue, forKey: Keys.autofixReviews) }
+    }
+    private func loadAutofixFingerprints() -> [Int: PRFingerprint] {
+        guard let data = UserDefaults.standard.data(forKey: Keys.autofixFingerprints),
+              let decoded = try? JSONDecoder().decode([String: PRFingerprint].self, from: data)
+        else { return [:] }
+        return Dictionary(uniqueKeysWithValues: decoded.compactMap { k, v in Int(k).map { ($0, v) } })
+    }
+    private func saveAutofixFingerprints(_ fps: [Int: PRFingerprint]) {
+        let keyed = Dictionary(uniqueKeysWithValues: fps.map { (String($0.key), $0.value) })
+        if let data = try? JSONEncoder().encode(keyed) {
+            UserDefaults.standard.set(data, forKey: Keys.autofixFingerprints)
+        }
+    }
+
     private func startProcessPoll() {
         guard processPollTask == nil else { return }
         processPollTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.refreshProcessStatuses()
                 await self?.refreshDeviceState()
-                self?.refreshAutofixStatus()
                 let ns = UInt64(Store.processPollInterval * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: ns)
             }

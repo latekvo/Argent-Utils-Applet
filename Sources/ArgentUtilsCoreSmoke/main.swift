@@ -161,6 +161,34 @@ let aBoth = AuditConfig(me: me, fixIssues: true, openPRs: true)
 assert(aBoth.buildPrompt().contains("OPEN ISSUES") && aBoth.buildPrompt().contains("focused pull request"))
 print("audit prompt assertions passed")
 
+// ---- Auto-fix monitor diff (edge-triggering) ----
+section("autofix diff")
+func snap(_ n: Int, mergeable: String = "MERGEABLE", decision: String = "", threads: Int = 0) -> PRSnapshot {
+    PRSnapshot(number: n, title: "PR \(n)", url: "u\(n)", headRef: "b\(n)", isDraft: false,
+               mergeable: mergeable, reviewDecision: decision, threadsUnresolved: threads)
+}
+// First run: everything seeds, nothing fires.
+let base = AutofixDiff.compute(prior: [:], now: [snap(1), snap(2, mergeable: "CONFLICTING", threads: 3)])
+assert(base.events.isEmpty, "baseline must not dispatch")
+assert(base.fingerprints.count == 2)
+// Clean -> conflicting fires exactly one conflict event.
+let c = AutofixDiff.compute(prior: base.fingerprints, now: [snap(1, mergeable: "CONFLICTING"), snap(2, mergeable: "CONFLICTING", threads: 3)])
+assert(c.events == [.conflict(snap(1, mergeable: "CONFLICTING"))], "clean->conflicting fires once")
+// More unresolved threads OR a new CHANGES_REQUESTED fires a review event.
+let rPrior = [1: PRFingerprint(mergeable: "MERGEABLE", reviewDecision: "", threadsUnresolved: 1)]
+assert(AutofixDiff.compute(prior: rPrior, now: [snap(1, threads: 4)]).events == [.review(snap(1, threads: 4))])
+assert(AutofixDiff.compute(prior: rPrior, now: [snap(1, decision: "CHANGES_REQUESTED", threads: 1)]).events
+       == [.review(snap(1, decision: "CHANGES_REQUESTED", threads: 1))])
+// Our own "Fixed in <hash>" replies (threads resolved, verdict unchanged) must NOT fire.
+let selfReply = [1: PRFingerprint(mergeable: "MERGEABLE", reviewDecision: "CHANGES_REQUESTED", threadsUnresolved: 5)]
+assert(AutofixDiff.compute(prior: selfReply, now: [snap(1, decision: "CHANGES_REQUESTED", threads: 0)]).events.isEmpty,
+       "resolving threads must not retrigger")
+// UNKNOWN mergeable carries the prior value forward — no phantom conflict.
+let unk = [1: PRFingerprint(mergeable: "MERGEABLE", reviewDecision: "", threadsUnresolved: 0)]
+let u = AutofixDiff.compute(prior: unk, now: [snap(1, mergeable: "UNKNOWN")])
+assert(u.events.isEmpty && u.fingerprints[1]?.mergeable == "MERGEABLE", "UNKNOWN carries prior forward")
+print("autofix diff assertions passed")
+
 if ProcessInfo.processInfo.environment["ARGENT_UTILS_DUMP"] == "1" {
     section("live gh dump (cross-check vs Python)")
     let viewer = try await API.fetchViewerLogin()

@@ -157,7 +157,7 @@ struct ContentView: View {
                     }
                     Spacer(minLength: 4)
                     if live, let s = store.autofixStatus {
-                        Text("watching \(s.watching)\(s.totalFixed > 0 ? " · fixed \(s.totalFixed)" : "")")
+                        Text("watching \(s.watching)\(s.totalHandled > 0 ? " · fixed \(s.totalHandled)" : "")")
                             .font(.system(size: 9).monospacedDigit())
                             .foregroundStyle(.secondary)
                     }

@@ -20,7 +20,7 @@ struct SettingsView: View {
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .task {
             await store.refreshAllocatorInstall()
-            store.refreshAutofixStatus()
+            await store.runAutofixPollOnce()
         }
     }
 

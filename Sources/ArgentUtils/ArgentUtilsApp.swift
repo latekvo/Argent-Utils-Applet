@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             || env["ARGENT_UTILS_RENDER"] != nil
             || env["ARGENT_UTILS_TRACK_TEST"] == "1"
             || env["ARGENT_UTILS_DEVICE_DUMP"] == "1"
+            || env["ARGENT_UTILS_AUTOFIX_POLL"] == "1"
 
         // Singleton, newest-wins: a freshly launched GUI instance kills any older
         // ones so there's never more than one wrench. Skipped in headless self-test
@@ -86,6 +87,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // real state.json — and print them. Works headless (e.g. with a locked screen).
         if env["ARGENT_UTILS_DEVICE_DUMP"] == "1" {
             Dump.deviceAllocator(); exit(0)
+        }
+        // Auto-fix monitor self-test: one real poll of my open PRs + the diff/dispatch
+        // decision, printed. Proves the gh query, snapshot parse, edge-triggered diff,
+        // and the exact prompts it would spawn — without opening any terminal.
+        if env["ARGENT_UTILS_AUTOFIX_POLL"] == "1" {
+            Task { await Dump.autofixPoll(); exit(0) }
         }
     }
 }
@@ -290,6 +297,51 @@ enum Dump {
             print("\n----- APPLESCRIPT (\(AgentSpawner.resolved(.iterm).title)) -----")
             print(AgentSpawner.appleScript(for: AgentSpawner.resolved(.iterm), shellCommand: cmd))
             try? FileManager.default.removeItem(at: file)
+        }
+    }
+
+    /// Auto-fix monitor self-test: fetch my open PRs in the target repo (real gh),
+    /// print the snapshot table, confirm a first-run diff seeds without dispatching,
+    /// prove a synthetic transition would fire, and print the exact conflict + review
+    /// prompts the monitor would spawn. Opens no terminal.
+    static func autofixPoll() async {
+        do {
+            let me = try await API.fetchViewerLogin()
+            let cfg = try? CoreAssets.config()
+            let owner = cfg?.owner ?? "software-mansion"
+            let repo = cfg?.repo ?? "argent"
+            let snaps = try await AutofixMonitor.fetchSnapshots(owner: owner, repo: repo, me: me)
+            print("== autofix poll: @\(me) · \(owner)/\(repo) · \(snaps.count) open PRs ==\n")
+            for s in snaps.sorted(by: { $0.number > $1.number }) {
+                print("  #\(s.number)  \(s.mergeable)  "
+                    + "decision=\(s.reviewDecision.isEmpty ? "-" : s.reviewDecision)  "
+                    + "unresolved=\(s.threadsUnresolved)  \(s.isDraft ? "draft" : "ready")")
+            }
+
+            // First-run: baseline seeds, nothing dispatched.
+            let (baseEvents, fps) = AutofixDiff.compute(prior: [:], now: snaps)
+            print("\nfirst-run diff: \(baseEvents.count) events (expect 0 — baseline seeds \(fps.count) PRs)")
+
+            // Detection proof: against that baseline, flip the first PR to CONFLICTING.
+            if let s = snaps.first {
+                let conflicted = PRSnapshot(number: s.number, title: s.title, url: s.url,
+                    headRef: s.headRef, isDraft: s.isDraft, mergeable: "CONFLICTING",
+                    reviewDecision: s.reviewDecision, threadsUnresolved: s.threadsUnresolved)
+                var others = snaps.filter { $0.number != s.number }
+                others.append(conflicted)
+                let (ev, _) = AutofixDiff.compute(prior: fps, now: others)
+                print("after flipping #\(s.number) → CONFLICTING: \(ev.count) event(s) "
+                    + "\(ev.contains(.conflict(conflicted)) ? "✓ conflict on #\(s.number)" : "✗")")
+
+                print("\n----- CONFLICT prompt it would spawn (#\(s.number)) -----")
+                print(ConflictConfig(target: .specific, me: me, specificPR: String(s.number)).buildPrompt())
+                print("\n----- REVIEW prompt it would spawn (#\(s.number), Deep · flags off/off/on) -----")
+                print(ReviewConfig(depth: "deep", target: .specific, me: me,
+                                   markReady: false, leaveReviews: false, replyToReviews: true,
+                                   specificPR: String(s.number)).buildPrompt())
+            }
+        } catch {
+            print("AUTOFIX POLL ERROR: \((error as? LocalizedError)?.errorDescription ?? "\(error)")")
         }
     }
 
