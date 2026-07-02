@@ -392,9 +392,12 @@ final class Store: ObservableObject {
     /// formal per-line comments) on a PR someone asked me to review — hands off the branch.
     private func dispatchReviewRequest(_ snap: PRSnapshot) async {
         if processes.contains(where: { $0.prURL == snap.url && !$0.done }) { return }
+        // Most-comprehensive review (max depth = Full E2E ×2) leaving formal inline
+        // comments, but NO auto-verdict — the final approve/changes-requested is the
+        // user's (knownTheirs emits the neutral-COMMENT, no-verdict prompt).
         let prompt = ReviewConfig(depth: "max", target: .specific, me: effectiveMe,
                                   markReady: false, leaveReviews: true, replyToReviews: false,
-                                  specificPR: String(snap.number), finalPass: true,
+                                  specificPR: String(snap.number),
                                   knownTheirs: true).buildPrompt()
         let preferred = terminal
         do {

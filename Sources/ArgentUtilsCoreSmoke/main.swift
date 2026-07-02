@@ -214,7 +214,7 @@ print("known-mine review prompt assertions passed")
 section("known-theirs review prompt")
 let kt = ReviewConfig(depth: "max", target: .specific, me: "latekvo",
                       markReady: false, leaveReviews: true, replyToReviews: false,
-                      specificPR: "500", finalPass: true, knownTheirs: true).buildPrompt()
+                      specificPR: "500", knownTheirs: true).buildPrompt()
 assert(!kt.contains("WHO AUTHORED IT"), "known-theirs skips the author poll")
 assert(!kt.contains("CASE A") && !kt.contains("CASE B"), "no case branching")
 assert(kt.contains("SOMEONE ELSE'S"), "review-only framing")
@@ -222,7 +222,10 @@ assert(kt.contains("ABSOLUTELY DO NOT touch their branch"), "reviewOnly block pr
 assert(kt.contains("POST a pull-request review"), "leaveReviews block present")
 assert(kt.contains("Do NOT mark this PR ready"), "otherNoMarkReady present")
 assert(kt.contains("SECOND, independent verification"), "max-depth fragment present")
-assert(kt.contains("APPROVE"), "finalPass verdict present")
+// No auto-verdict — the final approve is the user's, not the agent's.
+assert(kt.contains("Do NOT submit an APPROVE"), "no-verdict instruction present")
+assert(kt.contains("PR #500 looks clean"), "no-verdict {pr} substituted")
+assert(!kt.contains("still APPROVE"), "the finalPass approve-verdict block is gone")
 assert(!kt.contains("fix it directly on the PR's branch"), "never fixes someone else's branch")
 assert(!kt.contains("No AI attribution"), "no commits ⇒ no attribution block")
 print("known-theirs review prompt assertions passed")

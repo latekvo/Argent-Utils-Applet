@@ -255,8 +255,10 @@ public struct ReviewConfig {
         if let b = blocks["reviewOnly"] { out.append(b) }
         if leaveReviews, let b = blocks["leaveReviews"] { out.append(b) }
         out.append(fill(specific["otherNoMarkReady"] ?? ""))
+        // Automatic runs never deliver the approve/changes-requested verdict — that
+        // final call stays with the user. (Replaces the finalPass verdict block.)
+        if let b = blocks["noVerdict"] { out.append(fill(b)) }
         if let trailer = blocks["trailer"] { out.append(trailer) }
-        if finalPass, let b = blocks["finalPass"] { out.append(b) }
         return out.filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
 

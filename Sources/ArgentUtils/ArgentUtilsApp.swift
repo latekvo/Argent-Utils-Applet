@@ -368,10 +368,10 @@ enum Dump {
             print("\n== review-requested-of-me: \(reqs.count) open PR(s) ==")
             for r in reqs { print("  #\(r.number)  \(r.title.prefix(55))") }
             let sample = reqs.first?.number ?? 999
-            print("\n----- COMPREHENSIVE REVIEW prompt (review-requested #\(sample), max + finalPass, leave comments) -----")
+            print("\n----- COMPREHENSIVE REVIEW prompt (review-requested #\(sample), max · leave comments · NO auto-verdict) -----")
             print(ReviewConfig(depth: "max", target: .specific, me: me,
                                markReady: false, leaveReviews: true, replyToReviews: false,
-                               specificPR: String(sample), finalPass: true, knownTheirs: true).buildPrompt())
+                               specificPR: String(sample), knownTheirs: true).buildPrompt())
         } catch {
             print("AUTOFIX POLL ERROR: \((error as? LocalizedError)?.errorDescription ?? "\(error)")")
         }

@@ -43,7 +43,8 @@ struct SettingsView: View {
             .toggleStyle(.switch)
             .controlSize(.small)
             Text("When someone requests my review on a PR, spawns the most thorough review "
-                 + "(Full E2E ×2 + verdict, leaving inline comments) — read-only, never touches their branch."
+                 + "(Full E2E ×2, leaving inline comments) — read-only, never touches their branch. "
+                 + "It won't approve or request changes; that final call stays with you."
                  + (store.reviewRequestsHandled > 0 ? "  Reviewed \(store.reviewRequestsHandled) so far." : ""))
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
