@@ -359,7 +359,7 @@ enum Dump {
                 print("\n----- REVIEW prompt it would spawn (#\(s.number), Deep · known-mine · flags off/off/on) -----")
                 print(ReviewConfig(depth: "deep", target: .specific, me: me,
                                    markReady: false, leaveReviews: false, replyToReviews: true,
-                                   specificPR: String(s.number), knownMine: true).buildPrompt())
+                                   specificPR: String(s.number), specificAuthor: .mine).buildPrompt())
             }
 
             // Review-request feed: PRs where someone asked for MY review.
@@ -371,7 +371,7 @@ enum Dump {
             print("\n----- COMPREHENSIVE REVIEW prompt (review-requested #\(sample), max · leave comments · NO auto-verdict) -----")
             print(ReviewConfig(depth: "max", target: .specific, me: me,
                                markReady: false, leaveReviews: true, replyToReviews: false,
-                               specificPR: String(sample), knownTheirs: true).buildPrompt())
+                               specificPR: String(sample), specificAuthor: .theirs).buildPrompt())
         } catch {
             print("AUTOFIX POLL ERROR: \((error as? LocalizedError)?.errorDescription ?? "\(error)")")
         }

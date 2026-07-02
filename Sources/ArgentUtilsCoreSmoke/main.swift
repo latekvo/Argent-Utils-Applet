@@ -193,7 +193,7 @@ print("autofix diff assertions passed")
 section("known-mine review prompt")
 let km = ReviewConfig(depth: "deep", target: .specific, me: "latekvo",
                       markReady: false, leaveReviews: false, replyToReviews: true,
-                      specificPR: "440", knownMine: true).buildPrompt()
+                      specificPR: "440", specificAuthor: .mine).buildPrompt()
 // No author poll, no CASE A/B branching — we already know it's ours.
 assert(!km.contains("WHO AUTHORED IT"), "known-mine skips the author poll")
 assert(!km.contains("CASE A") && !km.contains("CASE B"), "known-mine has no case branching")
@@ -214,7 +214,7 @@ print("known-mine review prompt assertions passed")
 section("known-theirs review prompt")
 let kt = ReviewConfig(depth: "max", target: .specific, me: "latekvo",
                       markReady: false, leaveReviews: true, replyToReviews: false,
-                      specificPR: "500", knownTheirs: true).buildPrompt()
+                      specificPR: "500", specificAuthor: .theirs).buildPrompt()
 assert(!kt.contains("WHO AUTHORED IT"), "known-theirs skips the author poll")
 assert(!kt.contains("CASE A") && !kt.contains("CASE B"), "no case branching")
 assert(kt.contains("SOMEONE ELSE'S"), "review-only framing")

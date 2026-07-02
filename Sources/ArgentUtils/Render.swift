@@ -56,10 +56,16 @@ enum Render {
             let target: PRTarget = specific ? .specific : (other ? .someone : .mine)
             let pr = wrong ? "https://github.com/some-org/other-repo/pull/42"
                            : "https://github.com/software-mansion/argent/pull/337"
+            // "-specific-mine" / "-specific-theirs" seed the polled author so the
+            // toggle-hiding can be eyeballed without a live gh call.
+            let seedAuthor: SpecificAuthor? = specific
+                ? (s.contains("theirs") ? .theirs : (s.contains("mine") ? .mine : nil))
+                : nil
             ReviewWizardView(scrolls: false,
                              seedTarget: target,
                              seedSpecificPR: specific ? pr : nil,
-                             seedUsername: other ? "octocat" : nil)
+                             seedUsername: other ? "octocat" : nil,
+                             seedSpecificAuthor: seedAuthor)
                 .frame(height: 560)
         case "conflicts":
             ConflictWizardView(scrolls: false).frame(height: 560)

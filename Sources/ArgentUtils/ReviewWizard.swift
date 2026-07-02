@@ -255,11 +255,13 @@ struct ReviewWizardView: View {
     init(scrolls: Bool = true,
          seedTarget: PRTarget? = nil,
          seedSpecificPR: String? = nil,
-         seedUsername: String? = nil) {
+         seedUsername: String? = nil,
+         seedSpecificAuthor: SpecificAuthor? = nil) {
         self.scrolls = scrolls
         if let v = seedTarget { _target = State(initialValue: v) }
         if let v = seedSpecificPR { _specificPR = State(initialValue: v) }
         if let v = seedUsername { _username = State(initialValue: v) }
+        if let v = seedSpecificAuthor { _specificAuthor = State(initialValue: v) }
     }
 
     @State private var depthValue: Double = ReviewWizardView.defaultDepthValue()
@@ -273,6 +275,10 @@ struct ReviewWizardView: View {
     @State private var specificPR = ""
     @State private var finalPass = false
     @State private var status: String?
+    /// For a specific PR: the polled author disposition (mine / theirs / not-yet). Drives
+    /// which action toggles show. `.unknown` while we determine it (offers all, gated).
+    @State private var specificAuthor: SpecificAuthor = .unknown
+    @State private var authorLoading = false
 
     /// The review-depth levels, loaded once from the shared core.
     private var depths: [ReviewDepth] { ReviewCatalog.depths() }
@@ -304,7 +310,8 @@ struct ReviewWizardView: View {
             includeDrafts: includeDrafts,
             includeReady: includeReady,
             specificPR: specificPR,
-            finalPass: finalPass)
+            finalPass: finalPass,
+            specificAuthor: specificAuthor)
     }
 
     var body: some View {
@@ -319,19 +326,44 @@ struct ReviewWizardView: View {
             titleRow
             targetRow
             contextRow
+            if target == .specific { authorHint }
             // Draft/ready scope applies to a whose-PRs sweep, not a single PR.
             if target != .specific { scopeRow }
             depthRow
             checkboxes
-            finalPassRow
+            // The Final-E2E verdict makes no sense for my own PRs (I don't approve my
+            // own work); hidden for the mine disposition.
+            if config.canFinalPass { finalPassRow }
             spawnButton
             if let status { statusLine(status) }
         }
         .padding(.trailing, 2)
-        // Animate contextual rows reflowing as the target/scope change.
+        // Animate contextual rows reflowing as the target/scope/author change.
         .animation(.easeInOut(duration: 0.22), value: target)
+        .animation(.easeInOut(duration: 0.22), value: specificAuthor)
         .animation(.easeInOut(duration: 0.22), value: includeDrafts)
         .animation(.easeInOut(duration: 0.22), value: includeReady)
+        .onChange(of: specificPR) { _ in refreshAuthor() }
+        .onChange(of: target) { _ in refreshAuthor() }
+    }
+
+    /// A one-line note under the single-PR field: whose PR it is once polled, so the
+    /// user knows why some toggles disappeared.
+    @ViewBuilder
+    private var authorHint: some View {
+        let (icon, text, color): (String, String, Color) = {
+            if authorLoading { return ("hourglass", "Checking who authored this PR…", .secondary) }
+            switch specificAuthor {
+            case .mine:    return ("person.fill", "Your PR — fix-on-branch review.", .green)
+            case .theirs:  return ("person.2.fill", "Someone else's PR — review only, hands off.", .orange)
+            case .unknown: return ("questionmark.circle", "Enter a PR to detect whether it's yours.", .secondary)
+            }
+        }()
+        HStack(spacing: 5) {
+            Image(systemName: icon).font(.system(size: 9)).foregroundStyle(color)
+            Text(text).font(.system(size: 10)).foregroundStyle(color)
+        }
+        .transition(rowTransition)
     }
 
     /// Whether the shared contextual field acts as a github-username box (someone
@@ -514,6 +546,43 @@ struct ReviewWizardView: View {
         guard target == .specific, let n = config.prRef.number else { return nil }
         let (owner, repo) = config.targetRepo
         return "https://github.com/\(owner)/\(repo)/pull/\(n)"
+    }
+
+    /// Poll the specific PR's author (debounced) so the wizard can hide the toggles that
+    /// don't apply and pick the right mine/theirs prompt — no author-guessing left to
+    /// the spawned agent.
+    private func refreshAuthor() {
+        guard target == .specific else { specificAuthor = .unknown; authorLoading = false; return }
+        let ref = config.prRef
+        guard ref.isValid, let num = ref.number else {
+            specificAuthor = .unknown; authorLoading = false; return
+        }
+        let (owner, repo) = config.targetRepo
+        let me = store.effectiveMe
+        let pending = specificPR
+        specificAuthor = .unknown        // offer all toggles while we determine
+        authorLoading = true
+        Task {
+            try? await Task.sleep(nanoseconds: 400_000_000)   // debounce keystrokes
+            if specificPR != pending { return }               // superseded by newer input
+            let login = await Self.fetchAuthor(owner: owner, repo: repo, number: num)
+            guard specificPR == pending, target == .specific else { return }
+            authorLoading = false
+            if let login, !me.isEmpty {
+                specificAuthor = login.lowercased() == me.lowercased() ? .mine : .theirs
+            } else {
+                specificAuthor = .unknown
+            }
+        }
+    }
+
+    /// One `gh pr view … --json author` → the author login, or nil on failure.
+    private static func fetchAuthor(owner: String, repo: String, number: Int) async -> String? {
+        guard let data = try? await GH.run(
+            ["pr", "view", String(number), "--repo", "\(owner)/\(repo)", "--json", "author"])
+        else { return nil }
+        struct R: Decodable { struct A: Decodable { let login: String }; let author: A }
+        return (try? JSONDecoder().decode(R.self, from: data))?.author.login
     }
 
     private func spawn() {

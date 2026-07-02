@@ -394,11 +394,11 @@ final class Store: ObservableObject {
         if processes.contains(where: { $0.prURL == snap.url && !$0.done }) { return }
         // Most-comprehensive review (max depth = Full E2E ×2) leaving formal inline
         // comments, but NO auto-verdict — the final approve/changes-requested is the
-        // user's (knownTheirs emits the neutral-COMMENT, no-verdict prompt).
+        // user's (specificAuthor .theirs emits the neutral-COMMENT, no-verdict prompt).
         let prompt = ReviewConfig(depth: "max", target: .specific, me: effectiveMe,
                                   markReady: false, leaveReviews: true, replyToReviews: false,
                                   specificPR: String(snap.number),
-                                  knownTheirs: true).buildPrompt()
+                                  specificAuthor: .theirs).buildPrompt()
         let preferred = terminal
         do {
             let result = try await Task.detached(priority: .userInitiated) {
@@ -443,7 +443,7 @@ final class Store: ObservableObject {
             kind = "review"; snap = s
             prompt = ReviewConfig(depth: "deep", target: .specific, me: effectiveMe,
                                   markReady: false, leaveReviews: false, replyToReviews: true,
-                                  specificPR: String(s.number), knownMine: true).buildPrompt()
+                                  specificPR: String(s.number), specificAuthor: .mine).buildPrompt()
             label = "Auto · Review · #\(s.number)"
         }
         // Never pile a second agent on a PR that already has one running.

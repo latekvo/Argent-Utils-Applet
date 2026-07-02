@@ -36,6 +36,14 @@ public enum ReviewCatalog {
     }
 }
 
+/// Who authored a specific PR under review, when known. Selects the prompt (fix-on-
+/// branch vs review-only vs author-gated) and which action toggles even apply.
+public enum SpecificAuthor: Equatable {
+    case unknown   // specific PR, author not polled yet / poll failed — offer everything
+    case mine      // fix on the branch (CASE A)
+    case theirs    // review only (CASE B)
+}
+
 /// Everything the Review-PRs wizard collects, plus the logic that turns it into
 /// the prompt handed to a fresh `claude` session. Pure value type — the prompt
 /// text comes from `core/review.json`; only the assembly order/conditions live
@@ -61,21 +69,16 @@ public struct ReviewConfig {
     /// The "final pass" escalation: a culminating full-E2E verdict pass. Off by default.
     public var finalPass: Bool
 
-    /// The caller already knows this specific PR is MINE (e.g. the auto-fix monitor,
-    /// which only ever polls my own PRs). Skips the author-poll + CASE A/B branching and
-    /// emits the mine-only (fix-on-branch) prompt directly. Ignored unless single-PR.
-    public var knownMine: Bool
-
-    /// The caller already knows this specific PR is SOMEONE ELSE'S (e.g. a review the
-    /// monitor saw requested from me — I can't be asked to review my own PR). Skips the
-    /// poll + branching and emits the review-only (hands-off) prompt directly.
-    public var knownTheirs: Bool
+    /// For a specific PR: whether it's mine, someone else's, or not yet determined. The
+    /// wizard polls the PR's author and sets this; the monitors set it directly (they
+    /// always know). Ignored unless single-PR.
+    public var specificAuthor: SpecificAuthor
 
     public init(depth: String = "", target: Target = .mine, username: String = "",
                 me: String = "", markReady: Bool = true, leaveReviews: Bool = true,
                 replyToReviews: Bool = true, includeDrafts: Bool = true,
                 includeReady: Bool = true, specificPR: String = "", finalPass: Bool = false,
-                knownMine: Bool = false, knownTheirs: Bool = false) {
+                specificAuthor: SpecificAuthor = .unknown) {
         self.depth = depth.isEmpty ? ReviewCatalog.defaultDepthID() : depth
         self.target = target
         self.username = username
@@ -87,8 +90,7 @@ public struct ReviewConfig {
         self.includeReady = includeReady
         self.specificPR = specificPR
         self.finalPass = finalPass
-        self.knownMine = knownMine
-        self.knownTheirs = knownTheirs
+        self.specificAuthor = specificAuthor
     }
 
     /// The @handle whose PRs we go through (empty in single-PR mode).
@@ -104,13 +106,27 @@ public struct ReviewConfig {
         }
     }
 
-    // A specific PR may be mine or someone's, so all three actions are offered.
-    public var canMarkReady: Bool { target != .someone }
-    public var canLeaveReviews: Bool { target != .mine }
-    public var canReplyToReviews: Bool { target != .someone }
+    /// The review disposition: mine (fix on branch) or theirs (review only). For a
+    /// whose-PRs sweep it follows the target; for a specific PR it's the polled author.
+    /// `.unknown` (specific, author still pending) offers every toggle, gated prompt.
+    public var disposition: SpecificAuthor {
+        switch target {
+        case .mine: return .mine
+        case .someone: return .theirs
+        case .specific: return specificAuthor
+        }
+    }
+    // Which action toggles apply. Mine-only toggles (mark-ready, reply-to-threads) hide
+    // for theirs; theirs-only toggles (formal review, final verdict) hide for mine.
+    // `.unknown` (author pending) leaves all four visible.
+    public var canMarkReady: Bool { disposition != .theirs }
+    public var canLeaveReviews: Bool { disposition != .mine }
+    public var canReplyToReviews: Bool { disposition != .theirs }
+    public var canFinalPass: Bool { disposition != .mine }
     public var effMarkReady: Bool { markReady && canMarkReady }
     public var effLeaveReviews: Bool { leaveReviews && canLeaveReviews }
     public var effReplyToReviews: Bool { replyToReviews && canReplyToReviews }
+    public var effFinalPass: Bool { finalPass && canFinalPass }
 
     /// Review exactly one PR by number/URL instead of a whose-PRs sweep.
     public var isSinglePR: Bool { target == .specific }
@@ -156,19 +172,19 @@ public struct ReviewConfig {
         let owner = cfg?.owner ?? "software-mansion"
         let repo = cfg?.repo ?? "argent"
 
-        // A specific PR may be mine OR someone else's — which decides whether the
-        // agent is allowed to touch the branch. Normally we can't know the author up
-        // front, so we hand the agent an author-gated prompt. But when the caller
-        // already knows it's mine (the auto-fix monitor only polls my PRs), skip the
-        // poll + CASE A/B and emit the mine-only prompt directly.
+        // A specific PR may be mine OR someone else's — which decides whether the agent
+        // may touch the branch. When we know the author (the wizard polled it, or a
+        // monitor set it) emit the mine-only / review-only prompt directly; otherwise
+        // (author still pending) fall back to the author-gated CASE A/B prompt.
         if isSinglePR {
-            if knownMine {
+            switch specificAuthor {
+            case .mine:
                 return buildKnownMinePrompt(review: review, scope: scope, blocks: blocks, owner: owner, repo: repo)
-            }
-            if knownTheirs {
+            case .theirs:
                 return buildKnownTheirsPrompt(review: review, scope: scope, blocks: blocks, owner: owner, repo: repo)
+            case .unknown:
+                return buildSpecificPrompt(review: review, scope: scope, blocks: blocks, owner: owner, repo: repo)
             }
-            return buildSpecificPrompt(review: review, scope: scope, blocks: blocks, owner: owner, repo: repo)
         }
 
         var out: [String] = []
@@ -197,7 +213,7 @@ public struct ReviewConfig {
         // Commit-authoring guidance only when we might actually commit — never
         // for someone else's branch, which we don't touch.
         if !isReviewOnly, let b = blocks["noAttribution"] { out.append(b) }
-        if finalPass, let b = blocks["finalPass"] { out.append(b) }
+        if effFinalPass, let b = blocks["finalPass"] { out.append(b) }
 
         return out.joined(separator: "\n\n")
     }
@@ -223,11 +239,11 @@ public struct ReviewConfig {
         out.append(chosen.fragment)
         if let bar = blocks["bar"] { out.append(bar) }
         if let ob = chosen.onBranch, !ob.isEmpty { out.append(ob) }
-        if markReady, let b = blocks["markReady"] { out.append(b) }
-        if replyToReviews, let b = blocks["reply"] { out.append(b) }
+        if effMarkReady, let b = blocks["markReady"] { out.append(b) }
+        if effReplyToReviews, let b = blocks["reply"] { out.append(b) }
         if let b = blocks["noAttribution"] { out.append(b) }
         if let trailer = blocks["trailer"] { out.append(trailer) }
-        if finalPass, let b = blocks["finalPass"] { out.append(b) }
+        // No final verdict for my own PR — I don't approve my own work.
         return out.filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
 
@@ -253,11 +269,16 @@ public struct ReviewConfig {
         out.append(chosen.fragment)
         if let bar = blocks["bar"] { out.append(bar) }
         if let b = blocks["reviewOnly"] { out.append(b) }
-        if leaveReviews, let b = blocks["leaveReviews"] { out.append(b) }
+        if effLeaveReviews, let b = blocks["leaveReviews"] { out.append(b) }
         out.append(fill(specific["otherNoMarkReady"] ?? ""))
-        // Automatic runs never deliver the approve/changes-requested verdict — that
-        // final call stays with the user. (Replaces the finalPass verdict block.)
-        if let b = blocks["noVerdict"] { out.append(fill(b)) }
+        // Deliver the approve/changes-requested verdict only when the Final-E2E toggle
+        // is on (manual review). Automatic runs leave it off → no verdict, the final
+        // call stays with me.
+        if effFinalPass, let b = blocks["finalPass"] {
+            out.append(b)
+        } else if let b = blocks["noVerdict"] {
+            out.append(fill(b))
+        }
         if let trailer = blocks["trailer"] { out.append(trailer) }
         return out.filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
@@ -293,18 +314,18 @@ public struct ReviewConfig {
         // CASE A — it's mine: fix it on the branch.
         out.append(fill(specific["mineHeader"] ?? ""))
         if let ob = chosen.onBranch, !ob.isEmpty { out.append(ob) }
-        if markReady, let b = blocks["markReady"] { out.append(b) }
-        if replyToReviews, let b = blocks["reply"] { out.append(b) }
+        if effMarkReady, let b = blocks["markReady"] { out.append(b) }
+        if effReplyToReviews, let b = blocks["reply"] { out.append(b) }
         if let b = blocks["noAttribution"] { out.append(b) }
 
         // CASE B — it's someone else's: review only, hands off the branch.
         out.append(fill(specific["otherHeader"] ?? ""))
         if let b = blocks["reviewOnly"] { out.append(b) }
-        if leaveReviews, let b = blocks["leaveReviews"] { out.append(b) }
+        if effLeaveReviews, let b = blocks["leaveReviews"] { out.append(b) }
         out.append(fill(specific["otherNoMarkReady"] ?? ""))
 
         if let trailer = blocks["trailer"] { out.append(trailer) }
-        if finalPass, let b = blocks["finalPass"] { out.append(b) }
+        if effFinalPass, let b = blocks["finalPass"] { out.append(b) }
 
         return out.filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
