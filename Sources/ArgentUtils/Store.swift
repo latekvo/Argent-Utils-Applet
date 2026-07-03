@@ -434,16 +434,20 @@ final class Store: ObservableObject {
     /// Spawn the most-comprehensive Review action (Full E2E ×2, formal per-line comments,
     /// no auto-verdict) on a PR someone asked me to review — hands off the branch.
     private func dispatchReviewRequest(_ r: AutofixMonitor.ReviewRequest) async {
+        // Trusted authors (member/maintainer/established contributor) get the final
+        // APPROVE/changes-requested verdict; unknown/first-time authors get comments only.
+        let verdict = r.verdictAllowed
         let prompt = ReviewConfig(depth: "max", target: .specific, me: effectiveMe,
                                   markReady: false, leaveReviews: true, replyToReviews: false,
-                                  specificPR: String(r.number),
+                                  specificPR: String(r.number), finalPass: verdict,
                                   specificAuthor: .theirs).buildPrompt()
         let preferred = terminal
         do {
             let result = try await Task.detached(priority: .userInitiated) {
                 try AgentSpawner.spawn(prompt, terminal: preferred)
             }.value
-            track(kind: "review", label: "Auto · Review-req · #\(r.number) (@\(r.author))",
+            let tag = verdict ? " +verdict" : ""
+            track(kind: "review", label: "Auto · Review-req · #\(r.number) (@\(r.author))\(tag)",
                   prURL: r.url, result: result, source: "auto")
             reviewRequestsHandled += 1
         } catch { }

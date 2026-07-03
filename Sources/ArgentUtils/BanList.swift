@@ -42,7 +42,11 @@ enum BanList {
     /// concurrent daemon write.
     static func unban(_ login: String) {
         var list = read()
-        list.removeAll { $0.login.lowercased() == login.lowercased() }
+        let l = login.lowercased()
+        // No-op (never rewrite the file) unless that login is actually banned — so a
+        // stray/duplicate call can't clobber the list.
+        guard list.contains(where: { $0.login.lowercased() == l }) else { return }
+        list.removeAll { $0.login.lowercased() == l }
         struct Wrap: Encodable { let banned: [BannedAuthor] }
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted]

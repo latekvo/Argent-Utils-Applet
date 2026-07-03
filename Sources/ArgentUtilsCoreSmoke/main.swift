@@ -234,6 +234,18 @@ assert(!kt.contains("fix it directly on the PR's branch"), "never fixes someone 
 assert(!kt.contains("No AI attribution"), "no commits ⇒ no attribution block")
 print("known-theirs review prompt assertions passed")
 
+// ---- known-theirs WITH verdict (trusted author: member/maintainer/contributor) ----
+// The review-request monitor sets finalPass=true when the PR author is trusted, so the
+// auto-review closes with an APPROVE/changes-requested verdict instead of comments only.
+section("known-theirs review prompt (trusted author → verdict)")
+let ktv = ReviewConfig(depth: "max", target: .specific, me: "latekvo",
+                       markReady: false, leaveReviews: true, replyToReviews: false,
+                       specificPR: "500", finalPass: true, specificAuthor: .theirs).buildPrompt()
+assert(ktv.contains("SOMEONE ELSE'S"), "review-only framing still present with verdict")
+assert(ktv.contains("still APPROVE"), "trusted author ⇒ finalPass APPROVE-verdict block present")
+assert(!ktv.contains("Do NOT submit an APPROVE"), "trusted author ⇒ no no-verdict block")
+print("known-theirs (trusted author) review prompt assertions passed")
+
 // ---- Claude API-error detection (terminal auto-continue) ----
 section("api-error match")
 assert(ApiErrorMatch.looksLikeApiError("⏺ API Error: 529 Overloaded. If it persists, check https://status.claude.com."))

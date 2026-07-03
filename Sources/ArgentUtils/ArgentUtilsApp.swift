@@ -368,13 +368,18 @@ enum Dump {
             print("\n== review-requested-of-me: \(reqs.count) open PR(s) ==")
             for r in reqs {
                 print("  #\(r.number)  owe=\(r.oweReview ? "YES → dispatch" : "no")  "
+                    + "author=@\(r.author)[\(r.authorAssociation)]→\(r.verdictAllowed ? "VERDICT" : "comments")  "
                     + "reqAt=\(r.requestedAt ?? "-")  myReview=\(r.myLastReviewAt ?? "-")  \(r.title.prefix(40))")
             }
-            let sample = reqs.first?.number ?? 999
-            print("\n----- COMPREHENSIVE REVIEW prompt (review-requested #\(sample), max · leave comments · NO auto-verdict) -----")
+            let sampleReq = reqs.first
+            let sample = sampleReq?.number ?? 999
+            let sampleVerdict = sampleReq?.verdictAllowed ?? false
+            print("\n----- COMPREHENSIVE REVIEW prompt (review-requested #\(sample), max · leave comments · "
+                + "\(sampleVerdict ? "trusted author → VERDICT" : "untrusted author → NO verdict")) -----")
             print(ReviewConfig(depth: "max", target: .specific, me: me,
                                markReady: false, leaveReviews: true, replyToReviews: false,
-                               specificPR: String(sample), specificAuthor: .theirs).buildPrompt())
+                               specificPR: String(sample), finalPass: sampleVerdict,
+                               specificAuthor: .theirs).buildPrompt())
         } catch {
             print("AUTOFIX POLL ERROR: \((error as? LocalizedError)?.errorDescription ?? "\(error)")")
         }

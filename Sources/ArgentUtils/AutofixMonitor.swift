@@ -56,6 +56,7 @@ enum AutofixMonitor {
         let url: String
         let headRef: String
         let author: String
+        let authorAssociation: String // OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR / NONE / …
         let requestedAt: String?    // latest "review requested from me" (ISO8601)
         let myLastReviewAt: String? // my latest review submission (ISO8601)
 
@@ -66,6 +67,14 @@ enum AutofixMonitor {
             guard let r = requestedAt else { return true } // requested but no event detail → assume owed
             guard let m = myLastReviewAt else { return true }
             return r > m
+        }
+
+        /// Trusted authors (org members, maintainers/collaborators, established
+        /// contributors) get the auto-review's final APPROVE/changes-requested verdict.
+        /// Unknown/first-time/outside authors get review comments only — the verdict is
+        /// mine to make.
+        var verdictAllowed: Bool {
+            ["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"].contains(authorAssociation.uppercased())
         }
     }
 
@@ -82,6 +91,7 @@ enum AutofixMonitor {
                 url
                 headRefName
                 author { login }
+                authorAssociation
                 timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 40) {
                   nodes { ... on ReviewRequestedEvent {
                     createdAt
@@ -105,6 +115,7 @@ enum AutofixMonitor {
                 let url: String?
                 let headRefName: String?
                 let author: Login?
+                let authorAssociation: String?
                 let timelineItems: TL?
                 let reviews: RVs?
             }
@@ -126,6 +137,7 @@ enum AutofixMonitor {
                 .compactMap { $0.submittedAt }.max()
             return ReviewRequest(number: number, title: n.title ?? "", url: n.url ?? "",
                                  headRef: n.headRefName ?? "", author: n.author?.login ?? "",
+                                 authorAssociation: n.authorAssociation ?? "NONE",
                                  requestedAt: reqAt, myLastReviewAt: myReviewAt)
         }
     }
