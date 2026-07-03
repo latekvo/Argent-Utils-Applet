@@ -580,11 +580,25 @@ final class Store: ObservableObject {
         let secs = ProcessInfo.processInfo.environment["ARGENT_UTILS_APIWATCH_SECS"].flatMap(Double.init)
         return max(5, secs ?? 20)
     }
-    /// Don't re-nudge the same tty within this window (avoids spamming while the error
-    /// text is still on screen before the agent produces new output).
+    /// Base delay before re-nudging the same tty. Doubles on every successive retry to a
+    /// session that keeps erroring (exponential backoff), so an agent stuck on a persistent
+    /// overload isn't hammered every two minutes forever.
     static let apiWatchCooldown: TimeInterval = 120
+    /// Backoff ceiling: never wait longer than this between retries to one session.
+    static let apiWatchMaxBackoff: TimeInterval = 3 * 60 * 60   // 3h
     private var apiWatchTask: Task<Void, Never>?
-    private var apiErrorCooldown: [String: Date] = [:]
+
+    /// Per-tty backoff state: when the next nudge is allowed, and the interval that got us
+    /// there (doubled to schedule the one after). Cleared when the session recovers.
+    private struct ApiBackoff { var nextAllowed: Date; var interval: TimeInterval }
+    private var apiErrorBackoff: [String: ApiBackoff] = [:]
+
+    /// Compact "2m" / "45m" / "3h" for the audit line.
+    static func humanInterval(_ s: TimeInterval) -> String {
+        if s >= 3600 { return "\(Int((s / 3600).rounded()))h" }
+        if s >= 60 { return "\(Int((s / 60).rounded()))m" }
+        return "\(Int(s))s"
+    }
 
     /// Count of nudges sent, for the Settings display.
     var apiWatchContinues: Int {
@@ -609,15 +623,26 @@ final class Store: ObservableObject {
         guard apiWatchEnabled else { return }
         let sessions = await Task.detached(priority: .utility) { ApiErrorWatcher.dumpSessions() }.value
         let now = Date()
+        var erroring = Set<String>()
         for s in sessions where ApiErrorMatch.looksLikeApiError(s.tail) {
-            if let last = apiErrorCooldown[s.tty], now.timeIntervalSince(last) < Store.apiWatchCooldown {
-                continue
-            }
-            apiErrorCooldown[s.tty] = now
+            erroring.insert(s.tty)
+            // Still inside this session's current backoff window — hold off.
+            if let b = apiErrorBackoff[s.tty], now < b.nextAllowed { continue }
             let tty = s.tty
             await Task.detached(priority: .userInitiated) { ApiErrorWatcher.sendContinue(tty: tty) }.value
             apiWatchContinues += 1
-            AuditLog.log("auto", "nudge", "Continued a stalled agent (API error) on \(tty)")
+            // Schedule the next retry: double the prior interval (base on first hit),
+            // capped at the 3h ceiling.
+            let next = apiErrorBackoff[s.tty].map { min($0.interval * 2, Store.apiWatchMaxBackoff) }
+                ?? Store.apiWatchCooldown
+            apiErrorBackoff[s.tty] = ApiBackoff(nextAllowed: now.addingTimeInterval(next), interval: next)
+            AuditLog.log("auto", "nudge",
+                "Continued a stalled agent (API error) on \(tty); next retry in ≥ \(Store.humanInterval(next))")
+        }
+        // A session that's on screen but no longer erroring has recovered — drop its
+        // backoff so a fresh error later starts back at the base interval.
+        for tty in sessions.map(\.tty) where !erroring.contains(tty) {
+            apiErrorBackoff.removeValue(forKey: tty)
         }
     }
 
