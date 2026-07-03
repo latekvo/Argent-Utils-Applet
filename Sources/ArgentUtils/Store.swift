@@ -81,6 +81,10 @@ final class Store: ObservableObject {
     /// receive no automated reviews, and appear in the "Banned" list above the sessions.
     @Published var bannedAuthors: [BannedAuthor] = []
 
+    /// Recent actions (panel-triggered + automatic + agent-reported), newest first — the
+    /// unified activity feed shown in the panel.
+    @Published var auditEntries: [AuditEntry] = []
+
     /// Whether the Claude-API-error terminal watcher is on: it nudges any agent that
     /// stalls on a transient server error to continue. Persisted; kicks a scan on enable.
     @Published var apiWatchEnabled: Bool {
@@ -108,7 +112,7 @@ final class Store: ObservableObject {
         static let autofixConflicts = "autofixConflictsHandled"
         static let autofixReviews = "autofixReviewsHandled"
         static let reviewRequestsEnabled = "reviewRequestsEnabled"
-        static let reviewRequestedSeen = "reviewRequestedSeen"
+        static let reviewReqDispatched = "reviewReqDispatched"
         static let reviewRequestsHandled = "reviewRequestsHandled"
         static let apiWatchEnabled = "apiWatchEnabled"
         static let apiWatchContinues = "apiWatchContinues"
@@ -186,6 +190,7 @@ final class Store: ObservableObject {
             startAutofixMonitor()
             startApiErrorWatcher()
             refreshBanList()
+            refreshAudit()
             Task { await fetchMe() }
             Task { await refreshDeviceState() }
             Task { await refreshAllocatorInstall() }
@@ -205,6 +210,7 @@ final class Store: ObservableObject {
     /// refresh so the row updates.
     func killDevice(_ key: String) async {
         _ = await Task.detached(priority: .userInitiated) { DeviceAllocator.killDevice(key: key) }.value
+        AuditLog.log("panel", "kill-device", "Killed device \(key)")
         await refreshDeviceState()
     }
 
@@ -316,13 +322,16 @@ final class Store: ObservableObject {
         return decoded
     }
 
-    /// Register a freshly spawned agent session for tracking.
-    func track(kind: String, label: String, prURL: String?, result: AgentSpawner.SpawnResult) {
+    /// Register a freshly spawned agent session for tracking, and record it in the audit
+    /// log. `source` is "panel" (a wizard SPAWN) or "auto" (a monitor dispatch).
+    func track(kind: String, label: String, prURL: String?, result: AgentSpawner.SpawnResult,
+               source: String = "panel") {
         let p = TrackedProcess(kind: kind, label: label,
                                terminal: result.terminal.rawValue,
                                windowID: result.windowID, sessionID: result.sessionID,
                                tty: result.tty, donePath: result.donePath, prURL: prURL)
         processes.append(p)
+        AuditLog.log(source, kind, label)
     }
 
     /// Remove one tracked session from the list (the row's ✕ button).
@@ -378,29 +387,31 @@ final class Store: ObservableObject {
             conflictsHandled: autofixConflictsHandled, reviewsHandled: autofixReviewsHandled)
     }
 
-    /// PRs that request MY review: when one NEWLY enters the requested set, dispatch the
-    /// most comprehensive review of it (someone else's PR → review-only, leave comments).
-    /// First run seeds the set silently so outstanding requests aren't retro-swarmed.
+    /// PRs that request MY review: dispatch the most-comprehensive review whenever I OWE
+    /// one — i.e. the latest "review requested from me" is newer than my last review of
+    /// that PR. Robust to re-requests (a fresh request re-qualifies even after I reviewed
+    /// once) and does NOT depend on observing a "request removed" transition, which a
+    /// re-request can slip past. Deduped by the request timestamp so a still-outstanding
+    /// request isn't re-dispatched each tick.
     private func pollReviewRequests(owner: String, repo: String) async {
-        let snaps: [PRSnapshot]
+        let reqs: [AutofixMonitor.ReviewRequest]
         do {
-            snaps = try await AutofixMonitor.fetchSnapshots(owner: owner, repo: repo,
-                                                            me: effectiveMe, role: .reviewRequested)
+            reqs = try await AutofixMonitor.fetchReviewRequests(owner: owner, repo: repo, me: effectiveMe)
         } catch {
             return
         }
-        let current = Set(snaps.map { $0.number })
-        guard let prior = loadReviewRequestedSeen() else {
-            saveReviewRequestedSeen(current)   // first run — baseline, no dispatch
-            return
-        }
         let banned = BanList.read()
-        for snap in snaps where !prior.contains(snap.number) {
-            // A prompt-injection-banned author gets no automated review from me.
-            if BanList.isBanned(snap.author, in: banned) { continue }
-            await dispatchReviewRequest(snap)
+        var dispatched = loadReviewReqDispatched()   // prNumber -> requestedAt we've handled
+        for r in reqs where r.oweReview {
+            let key = String(r.number)
+            let stamp = r.requestedAt ?? "-"
+            if dispatched[key] == stamp { continue }               // already dispatched for this request
+            if BanList.isBanned(r.author, in: banned) { continue } // banned → skip (fires after un-ban)
+            if processes.contains(where: { $0.prURL == r.url && !$0.done }) { continue } // in-flight
+            await dispatchReviewRequest(r)
+            dispatched[key] = stamp
         }
-        saveReviewRequestedSeen(current)   // seen (incl. banned) so it won't retro-fire
+        saveReviewReqDispatched(dispatched)
     }
 
     /// Re-read the prompt-injection ban list (cheap local file). Publishes on change.
@@ -408,30 +419,32 @@ final class Store: ObservableObject {
         let next = BanList.read()
         if next != bannedAuthors { bannedAuthors = next }
     }
+    /// Re-read the audit log (cheap local file). Publishes on change.
+    func refreshAudit() {
+        let next = AuditLog.read()
+        if next != auditEntries { auditEntries = next }
+    }
     /// Remove a ban (the UI's un-ban button) and refresh.
     func unban(_ login: String) {
         BanList.unban(login)
+        AuditLog.log("panel", "unban", "Un-banned @\(login)")
         refreshBanList()
     }
 
-    /// Spawn the most-comprehensive Review action (Full E2E ×2 + final verdict, leaving
-    /// formal per-line comments) on a PR someone asked me to review — hands off the branch.
-    private func dispatchReviewRequest(_ snap: PRSnapshot) async {
-        if processes.contains(where: { $0.prURL == snap.url && !$0.done }) { return }
-        // Most-comprehensive review (max depth = Full E2E ×2) leaving formal inline
-        // comments, but NO auto-verdict — the final approve/changes-requested is the
-        // user's (specificAuthor .theirs emits the neutral-COMMENT, no-verdict prompt).
+    /// Spawn the most-comprehensive Review action (Full E2E ×2, formal per-line comments,
+    /// no auto-verdict) on a PR someone asked me to review — hands off the branch.
+    private func dispatchReviewRequest(_ r: AutofixMonitor.ReviewRequest) async {
         let prompt = ReviewConfig(depth: "max", target: .specific, me: effectiveMe,
                                   markReady: false, leaveReviews: true, replyToReviews: false,
-                                  specificPR: String(snap.number),
+                                  specificPR: String(r.number),
                                   specificAuthor: .theirs).buildPrompt()
         let preferred = terminal
         do {
             let result = try await Task.detached(priority: .userInitiated) {
                 try AgentSpawner.spawn(prompt, terminal: preferred)
             }.value
-            track(kind: "review", label: "Auto · Review-req · #\(snap.number)",
-                  prURL: snap.url, result: result)
+            track(kind: "review", label: "Auto · Review-req · #\(r.number) (@\(r.author))",
+                  prURL: r.url, result: result, source: "auto")
             reviewRequestsHandled += 1
         } catch { }
     }
@@ -440,15 +453,12 @@ final class Store: ObservableObject {
         get { UserDefaults.standard.integer(forKey: Keys.reviewRequestsHandled) }
         set { UserDefaults.standard.set(newValue, forKey: Keys.reviewRequestsHandled) }
     }
-    /// nil ⇒ never polled (first run); a set (possibly empty) ⇒ the last poll's requests.
-    private func loadReviewRequestedSeen() -> Set<Int>? {
-        guard let arr = UserDefaults.standard.array(forKey: Keys.reviewRequestedSeen) as? [Int] else {
-            return nil
-        }
-        return Set(arr)
+    /// prNumber(String) -> the request timestamp we last dispatched a review for.
+    private func loadReviewReqDispatched() -> [String: String] {
+        (UserDefaults.standard.dictionary(forKey: Keys.reviewReqDispatched) as? [String: String]) ?? [:]
     }
-    private func saveReviewRequestedSeen(_ set: Set<Int>) {
-        UserDefaults.standard.set(Array(set), forKey: Keys.reviewRequestedSeen)
+    private func saveReviewReqDispatched(_ map: [String: String]) {
+        UserDefaults.standard.set(map, forKey: Keys.reviewReqDispatched)
     }
 
     /// Spawn the appropriate action-button agent for a detected transition and track
@@ -479,7 +489,7 @@ final class Store: ObservableObject {
             let result = try await Task.detached(priority: .userInitiated) {
                 try AgentSpawner.spawn(prompt, terminal: preferred)
             }.value
-            track(kind: kind, label: label, prURL: snap.url, result: result)
+            track(kind: kind, label: label, prURL: snap.url, result: result, source: "auto")
             if case .conflict = event { autofixConflictsHandled += 1 } else { autofixReviewsHandled += 1 }
         } catch {
             // Spawn failed (e.g. terminal-automation permission not granted). Skip; the
@@ -559,6 +569,7 @@ final class Store: ObservableObject {
             let tty = s.tty
             await Task.detached(priority: .userInitiated) { ApiErrorWatcher.sendContinue(tty: tty) }.value
             apiWatchContinues += 1
+            AuditLog.log("auto", "nudge", "Continued a stalled agent (API error) on \(tty)")
         }
     }
 
@@ -569,6 +580,7 @@ final class Store: ObservableObject {
                 await self?.refreshProcessStatuses()
                 await self?.refreshDeviceState()
                 self?.refreshBanList()
+                self?.refreshAudit()
                 let ns = UInt64(Store.processPollInterval * 1_000_000_000)
                 try? await Task.sleep(nanoseconds: ns)
             }

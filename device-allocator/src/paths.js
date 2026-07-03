@@ -24,6 +24,7 @@ export const BAN_DIR =
   process.env.DA_BAN_DIR || path.join(os.homedir(), '.argent', 'pr-monitor');
 export const BANNED_PATH = path.join(BAN_DIR, 'banned.json'); // the applet reads this
 export const INJECTIONS_DIR = path.join(BAN_DIR, 'injections'); // per-incident evidence
+export const AUDIT_PATH = path.join(BAN_DIR, 'audit.jsonl'); // shared action log the applet shows
 
 // Android SDK lives outside PATH on this machine, so resolve binaries by absolute
 // path from the SDK root (adb itself is usually on PATH via Homebrew).

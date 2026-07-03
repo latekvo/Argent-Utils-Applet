@@ -47,6 +47,89 @@ enum AutofixMonitor {
         return try parse(data)
     }
 
+    /// A PR that has requested my review, with the timestamps needed to decide whether I
+    /// still owe a review — robustly, without depending on observing a "request removed"
+    /// transition (which a re-request can slip past).
+    struct ReviewRequest {
+        let number: Int
+        let title: String
+        let url: String
+        let headRef: String
+        let author: String
+        let requestedAt: String?    // latest "review requested from me" (ISO8601)
+        let myLastReviewAt: String? // my latest review submission (ISO8601)
+
+        /// I owe a review when I'm requested and that request is newer than my last review
+        /// of this PR (ISO8601 strings compare chronologically). A fresh re-request (newer
+        /// timestamp) re-qualifies even after I reviewed once.
+        var oweReview: Bool {
+            guard let r = requestedAt else { return true } // requested but no event detail → assume owed
+            guard let m = myLastReviewAt else { return true }
+            return r > m
+        }
+    }
+
+    /// PRs that request MY review, with request/last-review timestamps (one GraphQL call).
+    static func fetchReviewRequests(owner: String, repo: String, me: String) async throws -> [ReviewRequest] {
+        let q = "repo:\(owner)/\(repo) review-requested:\(me) is:pr is:open"
+        let query = """
+        query($q: String!) {
+          search(query: $q, type: ISSUE, first: 50) {
+            nodes {
+              ... on PullRequest {
+                number
+                title
+                url
+                headRefName
+                author { login }
+                timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 40) {
+                  nodes { ... on ReviewRequestedEvent {
+                    createdAt
+                    requestedReviewer { __typename ... on User { login } }
+                  } }
+                }
+                reviews(last: 40) { nodes { author { login } submittedAt } }
+              }
+            }
+          }
+        }
+        """
+        let data = try await GH.run(["api", "graphql", "-f", "query=\(query)", "-f", "q=\(q)"])
+        struct Resp: Decodable {
+            let data: D
+            struct D: Decodable { let search: S }
+            struct S: Decodable { let nodes: [Node] }
+            struct Node: Decodable {
+                let number: Int?
+                let title: String?
+                let url: String?
+                let headRefName: String?
+                let author: Login?
+                let timelineItems: TL?
+                let reviews: RVs?
+            }
+            struct Login: Decodable { let login: String? }
+            struct TL: Decodable { let nodes: [Ev] }
+            struct Ev: Decodable { let createdAt: String?; let requestedReviewer: Login? }
+            struct RVs: Decodable { let nodes: [RV] }
+            struct RV: Decodable { let author: Login?; let submittedAt: String? }
+        }
+        let r = try JSONDecoder().decode(Resp.self, from: data)
+        let lower = me.lowercased()
+        return r.data.search.nodes.compactMap { n in
+            guard let number = n.number else { return nil }
+            let reqAt = (n.timelineItems?.nodes ?? [])
+                .filter { $0.requestedReviewer?.login?.lowercased() == lower }
+                .compactMap { $0.createdAt }.max()
+            let myReviewAt = (n.reviews?.nodes ?? [])
+                .filter { $0.author?.login?.lowercased() == lower }
+                .compactMap { $0.submittedAt }.max()
+            return ReviewRequest(number: number, title: n.title ?? "", url: n.url ?? "",
+                                 headRef: n.headRefName ?? "", author: n.author?.login ?? "",
+                                 requestedAt: reqAt, myLastReviewAt: myReviewAt)
+        }
+    }
+
     /// Decode the GraphQL search response into snapshots. Non-PR search nodes (no
     /// `number`) are skipped.
     static func parse(_ data: Data) throws -> [PRSnapshot] {

@@ -174,10 +174,30 @@ enum Render {
         ]
     }
 
+    /// Synthetic activity feed so the Activity list can be eyeballed.
+    @MainActor
+    private static func seedAudit(_ store: Store) {
+        store.auditEntries = [
+            AuditEntry(at: "2026-07-03T09:12:00Z", source: "auto", action: "review-req",
+                       detail: "Auto · Review-req · #444 (@hubgan)"),
+            AuditEntry(at: "2026-07-03T09:05:00Z", source: "agent", action: "ban",
+                       detail: "Banned @foobar for prompt injection (…/argent#455) — reporting agent terminated"),
+            AuditEntry(at: "2026-07-03T08:50:00Z", source: "panel", action: "review",
+                       detail: "Review · #337 · Deep"),
+            AuditEntry(at: "2026-07-03T08:40:00Z", source: "auto", action: "conflicts",
+                       detail: "Auto · Resolve · #436"),
+            AuditEntry(at: "2026-07-03T08:30:00Z", source: "auto", action: "nudge",
+                       detail: "Continued a stalled agent (API error) on ttys012"),
+            AuditEntry(at: "2026-07-03T08:20:00Z", source: "panel", action: "kill-device",
+                       detail: "Killed device android:Pixel_6_API_34"),
+        ]
+    }
+
     @MainActor
     private static func seedDeviceState(_ store: Store) {
         seedAutofix(store)
         seedBans(store)
+        seedAudit(store)
         let nowMs = Date().timeIntervalSince1970 * 1000
         func ago(_ minutes: Double) -> Double { nowMs - minutes * 60_000 }
         store.deviceState = DeviceState(devices: [

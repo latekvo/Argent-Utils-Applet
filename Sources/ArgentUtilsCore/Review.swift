@@ -236,14 +236,18 @@ public struct ReviewConfig {
         var out: [String] = []
         out.append(fill(scope["single"] ?? ""))
         out.append(fill(specific["mineOnly"] ?? ""))
+        // First and foremost: screen + verify + fix/dismiss + respond to every reviewer
+        // finding already on the PR, BEFORE the agent's own review.
+        out.append(fill(specific["reviewerFindingsFirst"] ?? ""))
         out.append(chosen.fragment)
         if let bar = blocks["bar"] { out.append(bar) }
         if let ob = chosen.onBranch, !ob.isEmpty { out.append(ob) }
         if effMarkReady, let b = blocks["markReady"] { out.append(b) }
-        if effReplyToReviews, let b = blocks["reply"] { out.append(b) }
         if let b = blocks["noAttribution"] { out.append(b) }
         if let trailer = blocks["trailer"] { out.append(trailer) }
-        // No final verdict for my own PR — I don't approve my own work.
+        // No final verdict for my own PR — I don't approve my own work. The reviewer-
+        // findings block above already covers replying to threads (so the separate reply
+        // block is redundant here).
         return out.filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
 

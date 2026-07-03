@@ -362,11 +362,14 @@ enum Dump {
                                    specificPR: String(s.number), specificAuthor: .mine).buildPrompt())
             }
 
-            // Review-request feed: PRs where someone asked for MY review.
-            let reqs = try await AutofixMonitor.fetchSnapshots(owner: owner, repo: repo, me: me,
-                                                               role: .reviewRequested)
+            // Review-request feed: PRs where someone asked for MY review, with the
+            // owe-a-review decision (request newer than my last review).
+            let reqs = try await AutofixMonitor.fetchReviewRequests(owner: owner, repo: repo, me: me)
             print("\n== review-requested-of-me: \(reqs.count) open PR(s) ==")
-            for r in reqs { print("  #\(r.number)  \(r.title.prefix(55))") }
+            for r in reqs {
+                print("  #\(r.number)  owe=\(r.oweReview ? "YES → dispatch" : "no")  "
+                    + "reqAt=\(r.requestedAt ?? "-")  myReview=\(r.myLastReviewAt ?? "-")  \(r.title.prefix(40))")
+            }
             let sample = reqs.first?.number ?? 999
             print("\n----- COMPREHENSIVE REVIEW prompt (review-requested #\(sample), max · leave comments · NO auto-verdict) -----")
             print(ReviewConfig(depth: "max", target: .specific, me: me,

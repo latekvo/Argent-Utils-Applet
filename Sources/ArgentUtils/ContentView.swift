@@ -7,9 +7,12 @@ import ArgentUtilsCore
 /// content lays out at its natural height; once that would exceed the cap the popover
 /// stops growing and the content scrolls instead of running off-screen.
 struct PopoverRoot: View {
-    /// Fixed popover width. Widened from the original 470 to give the Devices section
-    /// room for a device name, its holder, and a status badge on one line.
-    static let width: CGFloat = 560
+    /// Fixed popover width. Two-column layout: the left column holds the lists (status,
+    /// bans, sessions, devices, activity, results), the right the interactive controls
+    /// (search, tool grid, action wizards).
+    static let width: CGFloat = 1120
+    /// Width of each of the two columns (minus the inter-column gap + outer padding).
+    static let columnWidth: CGFloat = 536
 
     /// The content's measured natural height. Seeded with a sane default so the very
     /// first frame isn't zero-height; corrected on the first layout pass.
@@ -67,6 +70,8 @@ struct ContentView: View {
     @State private var lostProcessIDs: Set<UUID> = []
     /// Whether the prompt-injection ban list (above the sessions) is expanded.
     @State private var bannedExpanded = true
+    /// Whether the activity/audit log is expanded.
+    @State private var auditExpanded = true
     /// The login whose un-ban is awaiting inline confirmation (nil = none). Kept inline
     /// in the popover rather than an NSAlert, which would open behind the menu-bar window.
     @State private var pendingUnban: String?
@@ -79,26 +84,15 @@ struct ContentView: View {
         VStack(spacing: 8) {
             header
             if showingSettings {
+                // A form reads badly stretched to the full 2-column width; cap it.
                 SettingsView(isPresented: $showingSettings)
+                    .frame(maxWidth: 640, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                // The auto-fix monitor status pill sits at the very top of the main
-                // view (hidden in Settings, and when the feature is toggled off).
-                autofixBanner
-                // The prompt-injection ban list sits right above the agent sessions.
-                if !store.bannedAuthors.isEmpty { bannedList(store.bannedAuthors) }
-                // Ongoing agent sessions and the device pool belong to the main view
-                // only — they are hidden while Settings is open. Each also vanishes
-                // when empty.
-                if !store.processes.isEmpty { processList }
-                if let ds = store.deviceState, !ds.devices.isEmpty {
-                    DevicesView(ds: ds, tracked: store.processes,
-                                onKill: { key in Task { await store.killDevice(key) } })
+                HStack(alignment: .top, spacing: 12) {
+                    leftColumn.frame(width: PopoverRoot.columnWidth, alignment: .top)
+                    rightColumn.frame(width: PopoverRoot.columnWidth, alignment: .top)
                 }
-                searchBar
-                if let err = store.error { errorBanner(err) }
-                toolGrid
-                Divider()
-                resultsPane
             }
         }
         .padding(10)
@@ -262,6 +256,39 @@ struct ContentView: View {
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.12)))
     }
 
+    // MARK: activity / audit log
+
+    /// Collapsible unified activity feed — every action, whether triggered from the panel
+    /// or dispatched automatically (or reported by an agent). Newest first.
+    @ViewBuilder
+    private func auditList(_ entries: [AuditEntry]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) { auditExpanded.toggle() }
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: auditExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary).frame(width: 9)
+                    Image(systemName: "list.bullet.rectangle").font(.system(size: 9)).foregroundStyle(.secondary)
+                    Text("ACTIVITY").font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.secondary).kerning(0.5)
+                    Text("\(entries.count)").font(.system(size: 9).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Capsule().fill(Color.gray.opacity(0.15)))
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if auditExpanded {
+                ForEach(entries.prefix(30)) { entry in AuditRow(entry: entry) }
+            }
+        }
+        .padding(7)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.07)))
+    }
+
     // MARK: ongoing agent sessions
 
     private var processList: some View {
@@ -392,20 +419,60 @@ struct ContentView: View {
         }
     }
 
-    // MARK: results pane (lookup when searching, else the selected tool's list)
+    // MARK: two columns — lists on the left, interactive controls on the right
 
-    @ViewBuilder
-    private var resultsPane: some View {
-        let trimmed = query.trimmingCharacters(in: .whitespaces)
-        if let activeAction {
-            // The wizards size to their own content (scrolls: false); PopoverRoot's
-            // outer scroll view handles any overflow, so they never nest a scroller.
-            switch activeAction {
-            case .review:    ReviewWizardView(scrolls: false)
-            case .conflicts: ConflictWizardView(scrolls: false)
-            case .audit:     AuditWizardView(scrolls: false)
+    /// Left column: status pill, ban list, agent sessions, devices, activity log, and —
+    /// when no action wizard is open — the selected tool's result list / lookup.
+    private var leftColumn: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            autofixBanner
+            if !store.bannedAuthors.isEmpty { bannedList(store.bannedAuthors) }
+            if !store.processes.isEmpty { processList }
+            if let ds = store.deviceState, !ds.devices.isEmpty {
+                DevicesView(ds: ds, tracked: store.processes,
+                            onKill: { key in Task { await store.killDevice(key) } })
             }
-        } else if !trimmed.isEmpty, let n = Int(trimmed) {
+            if !store.auditEntries.isEmpty { auditList(store.auditEntries) }
+            if activeAction == nil {
+                Divider().padding(.vertical, 1)
+                listResultsPane
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// Right column: the reverse-lookup search, the tool grid, and — when an action card
+    /// is selected — its wizard.
+    private var rightColumn: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            searchBar
+            if let err = store.error { errorBanner(err) }
+            toolGrid
+            if activeAction != nil {
+                Divider().padding(.vertical, 1)
+                wizardPane
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The action wizard (interactive) — right column. Sizes to its own content
+    /// (scrolls: false); PopoverRoot's outer scroll view handles any overflow.
+    @ViewBuilder
+    private var wizardPane: some View {
+        switch activeAction {
+        case .review:    ReviewWizardView(scrolls: false)
+        case .conflicts: ConflictWizardView(scrolls: false)
+        case .audit:     AuditWizardView(scrolls: false)
+        case .none:      EmptyView()
+        }
+    }
+
+    /// The lookup / tool-result LIST (left column) shown when no wizard is open.
+    @ViewBuilder
+    private var listResultsPane: some View {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty, let n = Int(trimmed) {
             lookupView(n)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
         } else if !trimmed.isEmpty {
@@ -875,6 +942,49 @@ private struct DeviceRow: View {
             Text(text).font(.system(size: 9)).lineLimit(1)
         }
         .foregroundStyle(color)
+    }
+}
+
+// MARK: - Activity row
+
+private struct AuditRow: View {
+    let entry: AuditEntry
+
+    private var sourceColor: Color {
+        switch entry.source {
+        case "panel": return .blue
+        case "auto":  return .green
+        case "agent": return .red
+        default:      return .secondary
+        }
+    }
+    private var icon: String {
+        switch entry.action {
+        case "review", "review-req": return "checklist"
+        case "conflicts":            return "arrow.triangle.merge"
+        case "audit":                return "ladybug.fill"
+        case "nudge":                return "bolt.fill"
+        case "kill-device":          return "xmark.circle.fill"
+        case "unban":                return "hand.raised.slash.fill"
+        case "ban":                  return "hand.raised.fill"
+        default:                     return "circle.fill"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon).font(.system(size: 10)).foregroundStyle(sourceColor).frame(width: 16)
+            Text(entry.detail).font(.system(size: 10)).lineLimit(2)
+            Spacer(minLength: 4)
+            Text(entry.source).font(.system(size: 8, weight: .bold)).foregroundStyle(sourceColor)
+                .padding(.horizontal, 4).padding(.vertical, 1)
+                .background(Capsule().fill(sourceColor.opacity(0.15)))
+            if let d = entry.date {
+                Text(Fmt.clock(d)).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+            }
+        }
+        .padding(6)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.05)))
     }
 }
 

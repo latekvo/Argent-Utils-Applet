@@ -198,11 +198,15 @@ let km = ReviewConfig(depth: "deep", target: .specific, me: "latekvo",
 assert(!km.contains("WHO AUTHORED IT"), "known-mine skips the author poll")
 assert(!km.contains("CASE A") && !km.contains("CASE B"), "known-mine has no case branching")
 assert(!km.contains("SOMEONE ELSE'S"), "known-mine has no review-only block")
-// But it IS the fix-on-branch, reply, no-attribution disposition on the right PR.
+// But it IS the fix-on-branch, no-attribution disposition on the right PR, and it puts
+// resolving existing reviewer findings FIRST (screen/verify/fix-or-dismiss/respond).
 assert(km.contains("Review PR #440"))
 assert(km.contains("MINE") && km.contains("full authority"))
+assert(km.contains("FIRST AND FOREMOST, resolve every reviewer finding"))
+assert(km.contains(#""Fixed in <commit_hash>""#))
+// The reviewer-findings step comes before the agent's own deep-review approach.
+assert(km.range(of: "FIRST AND FOREMOST")!.lowerBound < km.range(of: "dispatch swarms of agents")!.lowerBound)
 assert(km.contains("fix it directly on the PR's branch"))
-assert(km.contains(#"replying "Fixed in <commit_hash>""#))
 assert(km.contains("No AI attribution"))
 assert(!km.contains("mark it ready for review"), "markReady=false omits the block")
 // The gated (author-unknown) path still branches, for the manual Specific-PR wizard.

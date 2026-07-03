@@ -23,7 +23,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import {
   SOCKET_PATH, DISCOVERY_PATH, REPAIRS_DIR,
   IDLE_LIMIT_MS, REAP_INTERVAL_MS, IDLE_INTERVAL_MS, POOL_INTERVAL_MS, ALLOC_GRACE_MS,
-  QUOTA, AWAIT_TIMEOUT_MS, BAN_DIR, BANNED_PATH, INJECTIONS_DIR,
+  QUOTA, AWAIT_TIMEOUT_MS, BAN_DIR, BANNED_PATH, INJECTIONS_DIR, AUDIT_PATH,
 } from './paths.js';
 import { writeDiscovery, writeState, pidAlive, ensureDirs, atomicWrite } from './state.js';
 import { log } from './log.js';
@@ -524,6 +524,15 @@ function captureEvidence(dir, ref, gh) {
   return out;
 }
 
+// Append one line to the shared audit log the applet displays. O_APPEND makes small
+// writes atomic across the daemon + applet.
+function appendAudit(source, action, detail) {
+  try {
+    fs.mkdirSync(BAN_DIR, { recursive: true });
+    fs.appendFileSync(AUDIT_PATH, `${JSON.stringify({ at: new Date().toISOString(), source, action, detail })}\n`);
+  } catch {}
+}
+
 async function handleReportInjection(p) {
   const login = String(p.person || '').trim().replace(/^@/, '');
   if (!login) { const e = new Error('person (the offending PR author login) is required'); e.statusCode = 400; throw e; }
@@ -554,6 +563,7 @@ async function handleReportInjection(p) {
     if (existing) Object.assign(existing, entry, { firstAt: existing.firstAt || existing.at });
     else data.banned.push({ ...entry, firstAt: at });
     atomicWrite(BANNED_PATH, data);
+    appendAudit('agent', 'ban', `Banned @${login} for prompt injection${p.pr ? ` (${p.pr})` : ''} — reporting agent terminated`);
     log('prompt-injection reported; banned', login, 'pr', p.pr || '?', 'gh', cap.ghCaptured, 'shot', cap.screenshotCaptured, 'dir', dir);
     return { banned: true, login, total: data.banned.length, evidenceDir: dir,
              ghCaptured: cap.ghCaptured, screenshotCaptured: cap.screenshotCaptured, url: cap.url };
