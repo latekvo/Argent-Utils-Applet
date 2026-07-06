@@ -43,7 +43,7 @@ struct PopoverRoot: View {
         .onPreferenceChange(ContentHeightKey.self) { h in
             if h > 1, abs(h - contentHeight) > 0.5 { contentHeight = h }
         }
-        .background(WindowCenterer(onDisplayVisibleHeight: { h in
+        .background(PopoverWindowController(onDisplayVisibleHeight: { h in
             if abs(h - displayVisibleHeight) > 0.5 { displayVisibleHeight = h }
         }))
     }
@@ -55,10 +55,11 @@ struct PopoverRoot: View {
 ///
 /// MenuBarExtra reuses one window and re-anchors it on every open WITHOUT re-running the
 /// SwiftUI view body, so a plain update-driven recentre only fires on the first open.
-/// Instead we grab the hosting window once and re-centre it off AppKit notifications that
-/// fire on every show (become-key / occlusion) and on the content-driven resize — keeping
-/// the vertical anchor below the menu bar and only ever moving the x.
-private struct WindowCenterer: NSViewRepresentable {
+/// Instead we grab the hosting window once and, off AppKit notifications that fire on every
+/// show/hide (become/resign-key, occlusion) and resize, we: keep it horizontally centred on
+/// its display, report that display's usable height for the content cap, and fade it in/out
+/// by animating `alphaValue` (the system otherwise shows/hides it instantly).
+private struct PopoverWindowController: NSViewRepresentable {
     /// Reports the usable height of the display the popover is on, so `PopoverRoot` caps
     /// its content to what actually fits there.
     var onDisplayVisibleHeight: (CGFloat) -> Void = { _ in }
@@ -76,6 +77,9 @@ private struct WindowCenterer: NSViewRepresentable {
     }
 
     final class Coordinator {
+        /// Fade-in / fade-out duration.
+        static let fadeDuration = 0.2
+
         var onDisplayVisibleHeight: (CGFloat) -> Void = { _ in }
         private weak var view: NSView?
         private weak var observed: NSWindow?
@@ -96,22 +100,66 @@ private struct WindowCenterer: NSViewRepresentable {
                 }
                 if self.observed !== window {
                     self.tokens.forEach(NotificationCenter.default.removeObserver)
-                    self.tokens.removeAll()
                     self.observed = window
+                    // Take over the show/hide look ourselves and start transparent so the
+                    // first appearance fades in rather than popping.
+                    window.animationBehavior = .none
+                    window.alphaValue = 0
                     let nc = NotificationCenter.default
-                    for name: NSNotification.Name in [
-                        NSWindow.didBecomeKeyNotification,          // each open (popover takes key)
-                        NSWindow.didChangeOcclusionStateNotification, // each show/hide
-                        NSWindow.didResizeNotification,             // content-height correction
-                    ] {
-                        self.tokens.append(nc.addObserver(forName: name, object: window, queue: .main) {
+                    self.tokens = [
+                        // Each open: the popover takes key focus.
+                        nc.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) {
+                            [weak self] _ in self?.onShow()
+                        },
+                        // Show/hide (also covers opens where key focus doesn't change).
+                        nc.addObserver(forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main) {
+                            [weak self] _ in self?.onOcclusionChange()
+                        },
+                        // Content-height correction resizes the window; keep it centred.
+                        nc.addObserver(forName: NSWindow.didResizeNotification, object: window, queue: .main) {
                             [weak self] _ in self?.center()
-                        })
-                    }
+                        },
+                        // Dismiss (click-outside / escape / toggle): fade out.
+                        nc.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) {
+                            [weak self] _ in self?.fadeOut()
+                        },
+                    ]
                 }
-                self.center()
+                self.onShow()
             }
         }
+
+        // MARK: show / hide
+
+        private func onShow() { center(); fadeIn() }
+
+        private func onOcclusionChange() {
+            guard let w = observed else { return }
+            if w.occlusionState.contains(.visible) {
+                onShow()
+            } else {
+                // Fully hidden: reset to transparent so the next open fades in cleanly.
+                w.alphaValue = 0
+            }
+        }
+
+        private func fadeIn() {
+            guard let w = observed, w.alphaValue < 0.99 else { return }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = Coordinator.fadeDuration
+                w.animator().alphaValue = 1
+            }
+        }
+
+        private func fadeOut() {
+            guard let w = observed, w.isVisible, w.alphaValue > 0.01 else { return }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = Coordinator.fadeDuration
+                w.animator().alphaValue = 0
+            }
+        }
+
+        // MARK: placement + sizing
 
         func center() {
             // Defer so we run AFTER the system has re-anchored + sized the window on show.
