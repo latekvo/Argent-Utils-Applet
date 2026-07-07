@@ -387,11 +387,13 @@ final class Store: ObservableObject {
 
     // MARK: PR auto-fix monitor
 
-    /// How often the monitor polls GitHub. 1 min by default so a review requested of me is
-    /// picked up within a minute, not left waiting; override for testing.
+    /// How often the monitor polls GitHub. 3 min by default — the GraphQL rate limit
+    /// (5000 points/hr) is real and these searches aren't cheap, so a tight cadence blows
+    /// the budget. Responsiveness comes from the immediate poll on wake / on enable, not
+    /// from a fast steady cadence. Override for testing.
     static var autofixPollInterval: TimeInterval {
         let secs = ProcessInfo.processInfo.environment["ARGENT_UTILS_AUTOFIX_SECS"].flatMap(Double.init)
-        return max(15, secs ?? 60)
+        return max(60, secs ?? 3 * 60)
     }
     private var autofixMonitorTask: Task<Void, Never>?
     private var wakeObserver: NSObjectProtocol?
@@ -491,7 +493,11 @@ final class Store: ObservableObject {
     private func pollReviewRequests(owner: String, repo: String) async {
         let reqs: [AutofixMonitor.ReviewRequest]
         do {
-            reqs = try await AutofixMonitor.fetchReviewRequests(owner: owner, repo: repo, me: effectiveMe)
+            // Only pull changed-file paths (a big slice of the query cost) when auto-approvals
+            // are on — they're only used to gate the verdict, which is off by default.
+            reqs = try await AutofixMonitor.fetchReviewRequests(owner: owner, repo: repo,
+                                                                me: effectiveMe,
+                                                                includeFiles: autoApproveEnabled)
         } catch {
             return
         }

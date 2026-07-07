@@ -24,9 +24,12 @@ enum AutofixMonitor {
     static func fetchSnapshots(owner: String, repo: String, me: String,
                                role: Role = .author) async throws -> [PRSnapshot] {
         let q = "repo:\(owner)/\(repo) \(role.qualifier(me)) is:pr is:open"
+        // Keep the `first:` caps tight: GraphQL rate-limit cost multiplies nested
+        // connections (search × reviewThreads × comments), so oversized limits burn the
+        // 5000 pt/hr budget fast. 30 open PRs / 40 threads covers realistic worst cases.
         let query = """
         query($q: String!) {
-          search(query: $q, type: ISSUE, first: 100) {
+          search(query: $q, type: ISSUE, first: 30) {
             nodes {
               ... on PullRequest {
                 number
@@ -37,7 +40,7 @@ enum AutofixMonitor {
                 mergeable
                 reviewDecision
                 headRefName
-                reviewThreads(first: 100) {
+                reviewThreads(first: 40) {
                   nodes {
                     isResolved
                     viewerCanResolve
@@ -83,11 +86,17 @@ enum AutofixMonitor {
     }
 
     /// PRs that request MY review, with request/last-review timestamps (one GraphQL call).
-    static func fetchReviewRequests(owner: String, repo: String, me: String) async throws -> [ReviewRequest] {
+    /// `includeFiles` pulls each PR's changed paths for the verdict-withhold gate — a big
+    /// chunk of the query's rate-limit cost, and pointless unless auto-approvals are on
+    /// (verdicts are off by default), so the caller passes `false` then and we skip it.
+    /// The `first:` caps are kept tight for the same rate-limit reason.
+    static func fetchReviewRequests(owner: String, repo: String, me: String,
+                                    includeFiles: Bool = false) async throws -> [ReviewRequest] {
         let q = "repo:\(owner)/\(repo) review-requested:\(me) is:pr is:open"
+        let filesBlock = includeFiles ? "files(first: 60) { nodes { path } }" : ""
         let query = """
         query($q: String!) {
-          search(query: $q, type: ISSUE, first: 50) {
+          search(query: $q, type: ISSUE, first: 30) {
             nodes {
               ... on PullRequest {
                 number
@@ -96,14 +105,14 @@ enum AutofixMonitor {
                 headRefName
                 author { login }
                 authorAssociation
-                files(first: 100) { nodes { path } }
-                timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 40) {
+                \(filesBlock)
+                timelineItems(itemTypes: [REVIEW_REQUESTED_EVENT], last: 15) {
                   nodes { ... on ReviewRequestedEvent {
                     createdAt
                     requestedReviewer { __typename ... on User { login } }
                   } }
                 }
-                reviews(last: 40) { nodes { author { login } submittedAt } }
+                reviews(last: 15) { nodes { author { login } submittedAt } }
               }
             }
           }

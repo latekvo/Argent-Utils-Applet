@@ -377,7 +377,8 @@ enum Dump {
 
             // Review-request feed: PRs where someone asked for MY review, with the
             // owe-a-review decision (request newer than my last review).
-            let reqs = try await AutofixMonitor.fetchReviewRequests(owner: owner, repo: repo, me: me)
+            let reqs = try await AutofixMonitor.fetchReviewRequests(owner: owner, repo: repo, me: me,
+                                                                    includeFiles: true)
             let policy = VerdictPolicy()   // default (all suppressors on) for the dump
             print("\n== review-requested-of-me: \(reqs.count) open PR(s) ==")
             let nowStamp = Date()
