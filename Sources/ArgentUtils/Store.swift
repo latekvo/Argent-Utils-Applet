@@ -77,6 +77,11 @@ final class Store: ObservableObject {
     /// the top-of-panel status pill; freshness (`isLive`) decides active vs. offline.
     @Published var autofixStatus: AutofixStatus?
 
+    /// How many reviews I currently owe (someone requested my review and the request is
+    /// newer than my last review) but have no agent on them right now — the "unaddressed"
+    /// reviews the reconciler keeps retrying until they land. Refreshed each review poll.
+    @Published var unaddressedReviews: Int = 0
+
     /// Authors banned for prompt injection (read from the daemon's banned.json). They
     /// receive no automated reviews, and appear in the "Banned" list above the sessions.
     @Published var bannedAuthors: [BannedAuthor] = []
@@ -133,7 +138,7 @@ final class Store: ObservableObject {
         static let autofixConflicts = "autofixConflictsHandled"
         static let autofixReviews = "autofixReviewsHandled"
         static let reviewRequestsEnabled = "reviewRequestsEnabled"
-        static let reviewReqDispatched = "reviewReqDispatched"
+        static let reviewReqAttempts = "reviewReqAttempts"
         static let reviewRequestsHandled = "reviewRequestsHandled"
         static let verdictWithholdSkill = "verdictWithholdSkill"
         static let verdictWithholdInstaller = "verdictWithholdInstaller"
@@ -418,8 +423,14 @@ final class Store: ObservableObject {
     /// one — i.e. the latest "review requested from me" is newer than my last review of
     /// that PR. Robust to re-requests (a fresh request re-qualifies even after I reviewed
     /// once) and does NOT depend on observing a "request removed" transition, which a
-    /// re-request can slip past. Deduped by the request timestamp so a still-outstanding
-    /// request isn't re-dispatched each tick.
+    /// re-request can slip past.
+    ///
+    /// Crucially, the local "we dispatched an agent" record no longer suppresses a review
+    /// *forever*: a dispatched agent can die, hit an API error, or have its window closed
+    /// without ever leaving a review, in which case GitHub still shows the review owed and
+    /// no agent is running — an *unaddressed* review. `ReviewReconcile` re-dispatches those
+    /// as soon as it's possible (no in-flight agent, retry backoff elapsed), so a slip
+    /// never leaves a review permanently unanswered.
     private func pollReviewRequests(owner: String, repo: String) async {
         let reqs: [AutofixMonitor.ReviewRequest]
         do {
@@ -428,17 +439,36 @@ final class Store: ObservableObject {
             return
         }
         let banned = BanList.read()
-        var dispatched = loadReviewReqDispatched()   // prNumber -> requestedAt we've handled
-        for r in reqs where r.oweReview {
+        let now = Date()
+        var attempts = loadReviewReqAttempts()   // prNumber -> our attempt record
+        let owed = reqs.filter { $0.oweReview }
+        func inFlight(_ r: AutofixMonitor.ReviewRequest) -> Bool {
+            processes.contains(where: { $0.prURL == r.url && !$0.done })
+        }
+        for r in owed {
             let key = String(r.number)
             let stamp = r.requestedAt ?? "-"
-            if dispatched[key] == stamp { continue }               // already dispatched for this request
-            if BanList.isBanned(r.author, in: banned) { continue } // banned → skip (fires after un-ban)
-            if processes.contains(where: { $0.prURL == r.url && !$0.done }) { continue } // in-flight
-            await dispatchReviewRequest(r)
-            dispatched[key] = stamp
+            let decision = ReviewReconcile.decide(
+                prior: attempts[key], stamp: stamp, inFlight: inFlight(r),
+                banned: BanList.isBanned(r.author, in: banned), now: now)
+            switch decision {
+            case .skipBanned, .skipInFlight, .skipCoolingDown:
+                continue
+            case .dispatch(let attemptNumber):
+                await dispatchReviewRequest(r, attemptNumber: attemptNumber)
+                attempts[key] = ReviewAttempt(requestedAt: stamp, lastDispatchedAt: now,
+                                              attempts: attemptNumber)
+            }
         }
-        saveReviewReqDispatched(dispatched)
+        // Drop records for PRs I no longer owe (review landed, PR closed, request withdrawn)
+        // so the store can't grow unbounded and a future re-request starts a fresh series.
+        let owedKeys = Set(owed.map { String($0.number) })
+        attempts = attempts.filter { owedKeys.contains($0.key) }
+        saveReviewReqAttempts(attempts)
+        // Reviews still owed with no agent on them AFTER this poll — the ones a freshly
+        // spawned agent didn't cover (cooling down between retries, or a spawn that failed).
+        // Excludes banned authors, which we never auto-review.
+        unaddressedReviews = owed.filter { !inFlight($0) && !BanList.isBanned($0.author, in: banned) }.count
     }
 
     /// Re-read the prompt-injection ban list (cheap local file). Publishes on change.
@@ -460,7 +490,9 @@ final class Store: ObservableObject {
 
     /// Spawn the most-comprehensive Review action (Full E2E ×2, formal per-line comments,
     /// no auto-verdict) on a PR someone asked me to review — hands off the branch.
-    private func dispatchReviewRequest(_ r: AutofixMonitor.ReviewRequest) async {
+    /// `attemptNumber` ≥2 means this is a retry of a review a previous agent left
+    /// unaddressed; it's surfaced in the label/audit so the re-dispatch is visible.
+    private func dispatchReviewRequest(_ r: AutofixMonitor.ReviewRequest, attemptNumber: Int = 1) async {
         // The "final pass + verdict" escalation is allowed unless a configured suppressor
         // matches (SKILL / installer / community PR). Otherwise the review is comments-only
         // and the final call stays with me.
@@ -476,7 +508,8 @@ final class Store: ObservableObject {
                 try AgentSpawner.spawn(prompt, terminal: preferred)
             }.value
             let tag = verdict ? " +verdict" : " −verdict (\(reasons.joined(separator: ", ")))"
-            track(kind: "review", label: "Auto · Review-req · #\(r.number) (@\(r.author))\(tag)",
+            let retry = attemptNumber > 1 ? " · retry \(attemptNumber)" : ""
+            track(kind: "review", label: "Auto · Review-req · #\(r.number) (@\(r.author))\(tag)\(retry)",
                   prURL: r.url, result: result, source: "auto")
             reviewRequestsHandled += 1
         } catch { }
@@ -486,12 +519,18 @@ final class Store: ObservableObject {
         get { UserDefaults.standard.integer(forKey: Keys.reviewRequestsHandled) }
         set { UserDefaults.standard.set(newValue, forKey: Keys.reviewRequestsHandled) }
     }
-    /// prNumber(String) -> the request timestamp we last dispatched a review for.
-    private func loadReviewReqDispatched() -> [String: String] {
-        (UserDefaults.standard.dictionary(forKey: Keys.reviewReqDispatched) as? [String: String]) ?? [:]
+    /// prNumber(String) -> our attempt record (request stamp, last dispatch, attempt count).
+    /// Persisted as JSON so the retry backoff survives an applet restart.
+    private func loadReviewReqAttempts() -> [String: ReviewAttempt] {
+        guard let data = UserDefaults.standard.data(forKey: Keys.reviewReqAttempts),
+              let decoded = try? JSONDecoder().decode([String: ReviewAttempt].self, from: data)
+        else { return [:] }
+        return decoded
     }
-    private func saveReviewReqDispatched(_ map: [String: String]) {
-        UserDefaults.standard.set(map, forKey: Keys.reviewReqDispatched)
+    private func saveReviewReqAttempts(_ map: [String: ReviewAttempt]) {
+        if let data = try? JSONEncoder().encode(map) {
+            UserDefaults.standard.set(data, forKey: Keys.reviewReqAttempts)
+        }
     }
 
     /// Spawn the appropriate action-button agent for a detected transition and track

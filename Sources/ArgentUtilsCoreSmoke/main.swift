@@ -274,6 +274,34 @@ let allOff = VerdictPolicy(withholdOnSkill: false, withholdOnInstaller: false, w
 assert(allOff.allowsVerdict(files: skillFiles + installerFiles, authorAssociation: "NONE"), "all off ⇒ always verdict")
 print("verdict policy assertions passed")
 
+// ---- Review reconciler (retry unaddressed reviews) ----
+section("review reconcile")
+// Backoff: 5m → 10m → 20m → 40m → … → capped at 3h.
+assert(ReviewReconcile.retryDelay(afterAttempts: 1) == 5 * 60)
+assert(ReviewReconcile.retryDelay(afterAttempts: 2) == 10 * 60)
+assert(ReviewReconcile.retryDelay(afterAttempts: 3) == 20 * 60)
+assert(ReviewReconcile.retryDelay(afterAttempts: 20) == 3 * 60 * 60, "backoff caps at 3h")
+let t0 = Date(timeIntervalSinceReferenceDate: 1_000_000)
+// Never attempted → dispatch #1.
+assert(ReviewReconcile.decide(prior: nil, stamp: "2026-01-01T00:00:00Z",
+                              inFlight: false, banned: false, now: t0) == .dispatch(attemptNumber: 1))
+// Banned author → never, even if owed and idle.
+assert(ReviewReconcile.decide(prior: nil, stamp: "s", inFlight: false, banned: true, now: t0) == .skipBanned)
+// An agent is running for it → leave it be (ban check comes first only when banned).
+assert(ReviewReconcile.decide(prior: nil, stamp: "s", inFlight: true, banned: false, now: t0) == .skipInFlight)
+// Dispatched 1 min ago, agent no longer running, still owed → cool down (5m − 1m = 4m left).
+let a1 = ReviewAttempt(requestedAt: "s", lastDispatchedAt: t0.addingTimeInterval(-60), attempts: 1)
+assert(ReviewReconcile.decide(prior: a1, stamp: "s", inFlight: false, banned: false, now: t0)
+        == .skipCoolingDown(4 * 60), "within backoff ⇒ wait")
+// Same record but the 5-min backoff has elapsed → this is the unaddressed retry (#2).
+let a1old = ReviewAttempt(requestedAt: "s", lastDispatchedAt: t0.addingTimeInterval(-6 * 60), attempts: 1)
+assert(ReviewReconcile.decide(prior: a1old, stamp: "s", inFlight: false, banned: false, now: t0)
+        == .dispatch(attemptNumber: 2), "past backoff, still owed ⇒ re-dispatch")
+// A fresh re-request (newer stamp) supersedes the old series → dispatch #1 immediately.
+assert(ReviewReconcile.decide(prior: a1, stamp: "newer-stamp", inFlight: false, banned: false, now: t0)
+        == .dispatch(attemptNumber: 1), "newer request ⇒ fresh dispatch")
+print("review reconcile assertions passed")
+
 // ---- Claude API-error detection (terminal auto-continue) ----
 section("api-error match")
 assert(ApiErrorMatch.looksLikeApiError("⏺ API Error: 529 Overloaded. If it persists, check https://status.claude.com."))

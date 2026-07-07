@@ -54,6 +54,9 @@ enum Render {
             let _ = seedDeviceState(store)
             ContentView(showSettings: true)
         case "settings":
+            // Seed an outstanding review count so the "N unaddressed reviews — retrying"
+            // row renders under the review-requests toggle.
+            let _ = seedSettings(store)
             SettingsView(isPresented: .constant(true)).frame(height: 560)
         case "unban-confirm":
             // Seed the ban list and open the inline "Unban @X?" confirmation on a row —
@@ -162,6 +165,15 @@ enum Render {
                    readyForReviewAt: nil, files: ["pool.ts"], reviewDecision: "APPROVED",
                    mergeable: "CONFLICTING", reviewThreads: []),
         ]
+    }
+
+    /// Seed the review-requests settings so the "N unaddressed reviews — retrying" row
+    /// renders (ARGENT_UTILS_RENDER=settings).
+    @MainActor
+    private static func seedSettings(_ store: Store) {
+        store.reviewRequestsEnabled = true
+        store.reviewRequestsHandled = 7
+        store.unaddressedReviews = 2
     }
 
     /// A LIVE auto-fix heartbeat so the top-of-panel status pill renders "active".

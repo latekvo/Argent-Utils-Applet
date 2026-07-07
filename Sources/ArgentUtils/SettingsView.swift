@@ -42,13 +42,36 @@ struct SettingsView: View {
             }
             .toggleStyle(.switch)
             .controlSize(.small)
-            Text("When someone requests my review on a PR, spawns the most thorough review "
-                 + "(Full E2E ×2, leaving inline comments) — read-only, never touches their branch."
-                 + (store.reviewRequestsHandled > 0 ? "  Reviewed \(store.reviewRequestsHandled) so far." : ""))
+            Text(reviewRequestsBlurb)
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if store.reviewRequestsEnabled { unaddressedReviewsRow }
+
             if store.reviewRequestsEnabled { verdictPolicyBlock }
+        }
+    }
+
+    private var reviewRequestsBlurb: String {
+        let base = "When someone requests my review on a PR, spawns the most thorough review "
+            + "(Full E2E ×2, leaving inline comments) — read-only, never touches their branch. "
+            + "A review left unaddressed (agent died, lost connection, window closed) is retried "
+            + "automatically until it lands."
+        let handled = store.reviewRequestsHandled > 0 ? "  Reviewed \(store.reviewRequestsHandled) so far." : ""
+        return base + handled
+    }
+
+    /// Shown while any review I owe has no agent on it — the reconciler is retrying them.
+    @ViewBuilder
+    private var unaddressedReviewsRow: some View {
+        if store.unaddressedReviews > 0 {
+            let n = store.unaddressedReviews
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 9)).foregroundStyle(Color.orange)
+                Text("\(n) unaddressed review\(n == 1 ? "" : "s") — retrying")
+                    .font(.caption2).foregroundStyle(Color.orange)
+            }
         }
     }
 

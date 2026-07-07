@@ -367,13 +367,28 @@ enum Dump {
             let reqs = try await AutofixMonitor.fetchReviewRequests(owner: owner, repo: repo, me: me)
             let policy = VerdictPolicy()   // default (all suppressors on) for the dump
             print("\n== review-requested-of-me: \(reqs.count) open PR(s) ==")
+            let nowStamp = Date()
             for r in reqs {
                 let reasons = policy.withholdReasons(files: r.files, authorAssociation: r.authorAssociation)
                 let decision = reasons.isEmpty ? "VERDICT" : "comments (\(reasons.joined(separator: ", ")))"
-                print("  #\(r.number)  owe=\(r.oweReview ? "YES → dispatch" : "no")  "
+                // The reconciler's call for this request, assuming no local attempt record
+                // and no agent in flight — i.e. a cold start would (re)dispatch every owed PR.
+                let recon: String
+                if r.oweReview {
+                    switch ReviewReconcile.decide(prior: nil, stamp: r.requestedAt ?? "-",
+                                                  inFlight: false, banned: false, now: nowStamp) {
+                    case .dispatch(let n): recon = "reconcile→dispatch#\(n)"
+                    case .skipInFlight: recon = "reconcile→in-flight"
+                    case .skipBanned: recon = "reconcile→banned"
+                    case .skipCoolingDown(let s): recon = "reconcile→cooldown(\(Int(s))s)"
+                    }
+                } else { recon = "addressed" }
+                print("  #\(r.number)  owe=\(r.oweReview ? "YES" : "no")  \(recon)  "
                     + "author=@\(r.author)[\(r.authorAssociation)]→\(decision)  files=\(r.files.count)  "
                     + "reqAt=\(r.requestedAt ?? "-")  myReview=\(r.myLastReviewAt ?? "-")  \(r.title.prefix(40))")
             }
+            let owedCount = reqs.filter { $0.oweReview }.count
+            print("→ \(owedCount) review(s) owed; the reconciler (re)dispatches each until it lands.")
             let sampleReq = reqs.first
             let sample = sampleReq?.number ?? 999
             let sampleVerdict = sampleReq.map {
