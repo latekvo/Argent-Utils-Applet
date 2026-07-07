@@ -297,9 +297,15 @@ assert(ReviewReconcile.decide(prior: a1, stamp: "s", inFlight: false, banned: fa
 let a1old = ReviewAttempt(requestedAt: "s", lastDispatchedAt: t0.addingTimeInterval(-6 * 60), attempts: 1)
 assert(ReviewReconcile.decide(prior: a1old, stamp: "s", inFlight: false, banned: false, now: t0)
         == .dispatch(attemptNumber: 2), "past backoff, still owed ⇒ re-dispatch")
-// A fresh re-request (newer stamp) supersedes the old series → dispatch #1 immediately.
+// A re-request (new stamp) shortly after we dispatched is a force-push re-stamp — suppress
+// it rather than spawn a duplicate review agent.
 assert(ReviewReconcile.decide(prior: a1, stamp: "newer-stamp", inFlight: false, banned: false, now: t0)
-        == .dispatch(attemptNumber: 1), "newer request ⇒ fresh dispatch")
+        == .skipCoolingDown(ReviewReconcile.reRequestCooldown - 60), "re-request within cooldown ⇒ suppressed")
+// A re-request long after our last dispatch (past the force-push window) is a genuine fresh
+// review need → dispatch #1.
+let aOld = ReviewAttempt(requestedAt: "s", lastDispatchedAt: t0.addingTimeInterval(-2 * 60 * 60), attempts: 1)
+assert(ReviewReconcile.decide(prior: aOld, stamp: "newer-stamp", inFlight: false, banned: false, now: t0)
+        == .dispatch(attemptNumber: 1), "re-request past cooldown ⇒ fresh dispatch")
 print("review reconcile assertions passed")
 
 // ---- Agent activity (running vs awaiting input) ----

@@ -402,6 +402,8 @@ enum Dump {
             }
             let owedCount = reqs.filter { $0.oweReview }.count
             print("→ \(owedCount) review(s) owed; the reconciler (re)dispatches each until it lands.")
+            print("  (the VERDICT column reflects the policy only — an actual verdict also "
+                + "requires the auto-approvals master toggle, which is OFF by default.)")
             let sampleReq = reqs.first
             let sample = sampleReq?.number ?? 999
             let sampleVerdict = sampleReq.map {

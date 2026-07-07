@@ -90,10 +90,19 @@ final class Store: ObservableObject {
     /// unified activity feed shown in the panel.
     @Published var auditEntries: [AuditEntry] = []
 
+    /// Master switch for auto-approvals: whether an auto-dispatched review may EVER submit
+    /// a verdict (APPROVE / request changes) on my behalf. Default OFF — every auto-review
+    /// leaves comments only and the final call stays with me until I opt in. The per-class
+    /// withhold flags below only matter when this is on.
+    @Published var autoApproveEnabled: Bool {
+        didSet { UserDefaults.standard.set(autoApproveEnabled, forKey: Keys.autoApproveEnabled) }
+    }
+
     /// Auto-review verdict policy: each flag independently withholds the "final pass +
     /// verdict" escalation for one class of review-requested PR (SKILL / installer /
     /// community). All default ON. Persisted; no poll kick needed (only affects the next
-    /// dispatch). Combined into a `VerdictPolicy` via `verdictPolicy`.
+    /// dispatch). Combined into a `VerdictPolicy` via `verdictPolicy`. Only consulted when
+    /// `autoApproveEnabled` is on.
     @Published var verdictWithholdSkill: Bool {
         didSet { UserDefaults.standard.set(verdictWithholdSkill, forKey: Keys.verdictWithholdSkill) }
     }
@@ -141,6 +150,7 @@ final class Store: ObservableObject {
         static let reviewReqAttempts = "reviewReqAttempts"
         static let myReviewAttempts = "myReviewAttempts"
         static let reviewRequestsHandled = "reviewRequestsHandled"
+        static let autoApproveEnabled = "autoApproveEnabled"
         static let verdictWithholdSkill = "verdictWithholdSkill"
         static let verdictWithholdInstaller = "verdictWithholdInstaller"
         static let verdictWithholdCommunity = "verdictWithholdCommunity"
@@ -194,6 +204,9 @@ final class Store: ObservableObject {
         // so defaulting on can't falsely claim "active" when no monitor is running.
         prAutofixEnabled = defaults.object(forKey: Keys.prAutofixEnabled) as? Bool ?? true
         reviewRequestsEnabled = defaults.object(forKey: Keys.reviewRequestsEnabled) as? Bool ?? true
+        // Auto-approvals OFF by default — an auto-review never submits a verdict on my
+        // behalf until I explicitly opt in.
+        autoApproveEnabled = defaults.object(forKey: Keys.autoApproveEnabled) as? Bool ?? false
         verdictWithholdSkill = defaults.object(forKey: Keys.verdictWithholdSkill) as? Bool ?? true
         verdictWithholdInstaller = defaults.object(forKey: Keys.verdictWithholdInstaller) as? Bool ?? true
         verdictWithholdCommunity = defaults.object(forKey: Keys.verdictWithholdCommunity) as? Bool ?? true
@@ -508,10 +521,14 @@ final class Store: ObservableObject {
                 }
             }
         }
-        // Drop records for PRs I no longer owe (review landed, PR closed, request withdrawn)
-        // so the store can't grow unbounded and a future re-request starts a fresh series.
-        let owedKeys = Set(owed.map { String($0.number) })
-        attempts = attempts.filter { owedKeys.contains($0.key) }
+        // Keep each dispatch record until it ages past the backoff ceiling — NOT the moment
+        // the review lands. A force-push dismisses my review (briefly un-owing it) then
+        // re-requests; retaining the record across that flap lets `reRequestCooldown`
+        // recognise the re-request as churn instead of a fresh request. Aged-out records are
+        // dropped so the store can't grow unbounded and a real future re-request is fresh.
+        attempts = attempts.filter {
+            now.timeIntervalSince($0.value.lastDispatchedAt) < ReviewReconcile.retryMaxBackoff
+        }
         saveReviewReqAttempts(attempts)
         // Reviews still owed with no agent on them AFTER this poll — the ones a freshly
         // spawned agent didn't cover (cooling down between retries, or a spawn that failed).
@@ -542,11 +559,11 @@ final class Store: ObservableObject {
     /// unaddressed; it's surfaced in the label/audit so the re-dispatch is visible.
     @discardableResult
     private func dispatchReviewRequest(_ r: AutofixMonitor.ReviewRequest, attemptNumber: Int = 1) async -> Bool {
-        // The "final pass + verdict" escalation is allowed unless a configured suppressor
-        // matches (SKILL / installer / community PR). Otherwise the review is comments-only
-        // and the final call stays with me.
+        // Auto-approvals must be enabled AND no configured suppressor may match (SKILL /
+        // installer / community PR) for an auto-review to submit a verdict. Otherwise it's
+        // comments-only and the final call stays with me.
         let reasons = verdictPolicy.withholdReasons(files: r.files, authorAssociation: r.authorAssociation)
-        let verdict = reasons.isEmpty
+        let verdict = autoApproveEnabled && reasons.isEmpty
         let prompt = ReviewConfig(depth: "max", target: .specific, me: effectiveMe,
                                   markReady: false, leaveReviews: true, replyToReviews: false,
                                   specificPR: String(r.number), finalPass: verdict,
@@ -556,7 +573,14 @@ final class Store: ObservableObject {
             let result = try await Task.detached(priority: .userInitiated) {
                 try AgentSpawner.spawn(prompt, terminal: preferred)
             }.value
-            let tag = verdict ? " +verdict" : " −verdict (\(reasons.joined(separator: ", ")))"
+            let tag: String
+            if verdict {
+                tag = " +verdict"
+            } else if !autoApproveEnabled {
+                tag = " −verdict (auto-approvals off)"
+            } else {
+                tag = " −verdict (\(reasons.joined(separator: ", ")))"
+            }
             let retry = attemptNumber > 1 ? " · retry \(attemptNumber)" : ""
             track(kind: "review", label: "Auto · Review-req · #\(r.number) (@\(r.author))\(tag)\(retry)",
                   prURL: r.url, result: result, source: "auto")

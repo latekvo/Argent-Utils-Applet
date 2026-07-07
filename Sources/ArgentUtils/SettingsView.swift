@@ -48,7 +48,25 @@ struct SettingsView: View {
 
             if store.reviewRequestsEnabled { unaddressedReviewsRow }
 
-            if store.reviewRequestsEnabled { verdictPolicyBlock }
+            if store.reviewRequestsEnabled { autoApproveBlock }
+        }
+    }
+
+    /// Master switch for auto-approvals + (when on) the per-class verdict suppressors.
+    /// Off by default: an auto-review never submits a verdict on my behalf until I opt in.
+    private var autoApproveBlock: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: $store.autoApproveEnabled) {
+                Text("Let auto-reviews approve / request changes").font(.caption)
+            }
+            .toggleStyle(.switch).controlSize(.small)
+            .padding(.top, 2)
+            Text("Off ⇒ every auto-review leaves inline comments only; the approve / "
+                 + "request-changes call stays with you. On ⇒ a clean review may submit a "
+                 + "verdict, except where withheld below.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if store.autoApproveEnabled { verdictPolicyBlock }
         }
     }
 

@@ -30,12 +30,24 @@ public struct ReviewAttempt: Codable, Equatable {
 /// the review is still owed yet no agent is running: it's *unaddressed*, and we must
 /// re-dispatch. This type draws that line, with an exponential retry backoff so a review
 /// that keeps failing isn't hammered forever.
+///
+/// It also guards the opposite failure — a *duplicate* dispatch. When the PR author
+/// force-pushes, GitHub stamps a fresh review-requested timestamp (dismissing my pending /
+/// prior review and re-requesting), which the markers alone read as a brand-new request.
+/// Because we track our own dispatch locally, a new stamp within `reRequestCooldown` of our
+/// last dispatch is treated as churn and suppressed, not spawned as a second agent.
 public enum ReviewReconcile {
     /// Wait at least this long after a dispatch before retrying an owed-but-unaddressed
     /// review — long enough for a genuine agent to start and leave its review.
     public static let retryBase: TimeInterval = 5 * 60          // 5 min
     /// Backoff ceiling: never wait longer than this between retries to one PR.
     public static let retryMaxBackoff: TimeInterval = 3 * 60 * 60   // 3h
+    /// After we dispatch a review for a PR, ignore a *new* review-requested timestamp on
+    /// that PR for this long. GitHub stamps a fresh REVIEW_REQUESTED_EVENT when the author
+    /// force-pushes (it dismisses my pending/prior review and re-requests), which would
+    /// otherwise read as a brand-new request and spawn a duplicate agent. A genuinely fresh
+    /// re-request (author addressed feedback) only comes much later, past this window.
+    public static let reRequestCooldown: TimeInterval = 60 * 60   // 1h
 
     /// The cooldown before the next retry, given how many attempts we've already made:
     /// `retryBase * 2^(attempts-1)`, capped at `retryMaxBackoff`. 5m → 10m → 20m → … → 3h.
@@ -67,16 +79,21 @@ public enum ReviewReconcile {
                               banned: Bool, now: Date) -> Decision {
         if banned { return .skipBanned }
         if inFlight { return .skipInFlight }
-        // Fresh request (never attempted, or a newer request than the one we recorded) →
-        // dispatch straight away.
-        guard let rec = prior, rec.requestedAt == stamp else {
-            return .dispatch(attemptNumber: 1)
-        }
-        // Same request we already dispatched for, yet it's still owed with no agent on it:
-        // the earlier attempt didn't land. Retry once the backoff has elapsed.
-        let delay = retryDelay(afterAttempts: rec.attempts)
+        // Never dispatched for this PR (or its record aged out) → dispatch straight away.
+        guard let rec = prior else { return .dispatch(attemptNumber: 1) }
         let elapsed = now.timeIntervalSince(rec.lastDispatchedAt)
-        if elapsed < delay { return .skipCoolingDown(delay - elapsed) }
-        return .dispatch(attemptNumber: rec.attempts + 1)
+        if rec.requestedAt == stamp {
+            // Same request we already dispatched for, still owed with no agent on it: the
+            // earlier attempt didn't land. Retry once the escalating backoff has elapsed.
+            let delay = retryDelay(afterAttempts: rec.attempts)
+            if elapsed < delay { return .skipCoolingDown(delay - elapsed) }
+            return .dispatch(attemptNumber: rec.attempts + 1)
+        }
+        // A DIFFERENT request timestamp than the one we dispatched for. This is usually a
+        // force-push: GitHub re-stamps the review request, which must NOT immediately spawn
+        // a second agent. Hold off until our last dispatch is old enough that this reads as
+        // a genuine fresh review need rather than churn.
+        if elapsed < reRequestCooldown { return .skipCoolingDown(reRequestCooldown - elapsed) }
+        return .dispatch(attemptNumber: 1)
     }
 }

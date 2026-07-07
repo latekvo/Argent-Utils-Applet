@@ -178,6 +178,7 @@ enum Render {
         store.reviewRequestsEnabled = true
         store.reviewRequestsHandled = 7
         store.unaddressedReviews = 2
+        store.autoApproveEnabled = true   // show the master toggle ON + its nested suppressors
     }
 
     /// A LIVE auto-fix heartbeat so the top-of-panel status pill renders "active".
