@@ -56,6 +56,8 @@ class OpenPR:
     files: list[str]
     review_decision: str | None
     review_threads: list[ReviewThread]
+    # GitHub's mergeability: "MERGEABLE" / "CONFLICTING" / "UNKNOWN" (still computing).
+    mergeable: str = "UNKNOWN"
 
     @property
     def id(self) -> int:
@@ -65,6 +67,11 @@ class OpenPR:
     def ready_at(self) -> datetime:
         """Best-effort 'has been ready since' timestamp."""
         return self.ready_for_review_at or self.created_at
+
+    @property
+    def has_conflicts(self) -> bool:
+        """The PR has merge conflicts with its base branch."""
+        return self.mergeable == "CONFLICTING"
 
     def unaddressed_threads(self, me: str) -> list[ReviewThread]:
         """Threads on *my* PR I still owe a response on: resolvable, unresolved,
@@ -251,6 +258,7 @@ class API:
                     files=[f["path"] for f in n["files"]["nodes"]],
                     review_decision=n.get("reviewDecision"),
                     review_threads=threads,
+                    mergeable=n.get("mergeable") or "UNKNOWN",
                 )
             )
         return out

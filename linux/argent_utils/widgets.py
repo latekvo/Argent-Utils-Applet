@@ -52,7 +52,7 @@ class ElidedLabel(QLabel):
         painter.end()
 
 
-def _elided_label(text: str, _style_ignored: str) -> ElidedLabel:
+def _elided_label(text: str) -> ElidedLabel:
     return ElidedLabel(text, 9, "#9aa0a6")
 
 
@@ -98,7 +98,7 @@ class ToolCard(ClickableFrame):
         text.setSpacing(1)
         t = QLabel(title)
         t.setStyleSheet("font-weight: 600; font-size: 11px;")
-        s = _elided_label(subtitle, "color: palette(mid); font-size: 9px;")
+        s = _elided_label(subtitle)
         text.addWidget(t)
         text.addWidget(s)
         row.addLayout(text, 1)
@@ -140,7 +140,7 @@ class ActionCard(ClickableFrame):
         text.setSpacing(1)
         t = QLabel(title)
         t.setStyleSheet("font-weight: 600; font-size: 11px;")
-        s = _elided_label(subtitle, "color: palette(mid); font-size: 9px;")
+        s = _elided_label(subtitle)
         text.addWidget(t)
         text.addWidget(s)
         row.addLayout(text, 1)

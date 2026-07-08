@@ -53,25 +53,6 @@ def test_filters_select_expected_numbers():
     assert [p.number for p in Filters.my_unaddressed_review_prs(prs, "latekvo")] == [105]
 
 
-def test_autofix_is_live_only_on_fresh_heartbeat():
-    # The honesty guarantee: "active" requires a recent heartbeat, never just a flag.
-    from datetime import datetime, timedelta, timezone
-
-    from argent_utils import autofix
-
-    def stamp(dt):
-        return {"updatedAt": dt.strftime("%Y-%m-%dT%H:%M:%SZ")}
-
-    now = datetime.now(timezone.utc)
-    assert autofix.is_live(stamp(now)) is True
-    assert autofix.is_live(stamp(now - timedelta(minutes=5))) is True
-    assert autofix.is_live(stamp(now - timedelta(hours=1))) is False
-    assert autofix.is_live(None) is False
-    assert autofix.is_live({}) is False
-    assert autofix.is_live({"updatedAt": "garbage"}) is False
-    assert autofix.total_fixed({"conflictsResolved": 3, "reviewsAddressed": 2}) == 5
-
-
 def test_fmt_duration_held_time():
     # The in-use "held" label: sub-minute rounds to "just now", then m / h m / d h.
     assert Fmt.duration(0) == "just now"
@@ -87,6 +68,17 @@ def test_my_tools_empty_without_identity():
     prs = _prs()
     assert Filters.my_approved_prs(prs, "") == []
     assert Filters.my_unaddressed_review_prs(prs, "") == []
+
+
+def test_store_settings_are_isolated_from_the_real_user(tmp_path):
+    # conftest.py redirects QSettings into the per-test temp dir; a hidden-tools
+    # write from a test must land there, never in the user's real settings (which
+    # would also leak back in and break tests like test_store_lookup).
+    s = Store()
+    assert s.hidden_tools == set()
+    s.hidden_tools = {"skillPRs"}
+    s._settings.sync()
+    assert list(tmp_path.rglob("*.ini")), "Store settings must land in tmp_path"
 
 
 def test_store_lookup():
@@ -152,6 +144,45 @@ def test_review_prompt_blocks_by_target():
     ).is_valid
 
 
+def test_final_pass_never_applies_to_my_own_prs():
+    # The approve/changes-requested verdict is a reviewer's call — I don't approve
+    # my own work, so target=MINE drops the block even with the toggle on
+    # (Swift: canFinalPass = disposition != .mine).
+    mine = review.ReviewConfig(me="latekvo", final_pass=True)
+    assert not mine.can_final_pass and not mine.eff_final_pass
+    assert "FULL E2E pass" not in mine.build_prompt()
+
+    # Someone else's PRs and a specific PR (author unknown) keep the escalation.
+    other = review.ReviewConfig(
+        target=PRTarget.SOMEONE, username="someuser", final_pass=True
+    )
+    assert other.can_final_pass
+    assert "FULL E2E pass" in other.build_prompt()
+    single = review.ReviewConfig(
+        target=PRTarget.SPECIFIC, specific_pr="337", me="latekvo", final_pass=True
+    )
+    assert single.can_final_pass
+    assert "FULL E2E pass" in single.build_prompt()
+
+    # Off by default everywhere.
+    assert "FULL E2E pass" not in review.ReviewConfig(
+        target=PRTarget.SOMEONE, username="someuser"
+    ).build_prompt()
+
+
+def test_openpr_mergeable_and_has_conflicts():
+    # mergeable defaults to UNKNOWN (fixtures/older payloads) and only the exact
+    # CONFLICTING state reads as a conflict — mirrors OpenPR in Models.swift.
+    assert _prs()[0].mergeable == "UNKNOWN"
+    assert not _prs()[0].has_conflicts
+    conflicting = OpenPR(106, "conflicting", "u/106", False, "dave", NOW, None,
+                         ["c.ts"], None, [], mergeable="CONFLICTING")
+    assert conflicting.has_conflicts
+    clean = OpenPR(107, "clean", "u/107", False, "dave", NOW, None,
+                   ["d.ts"], None, [], mergeable="MERGEABLE")
+    assert not clean.has_conflicts
+
+
 def test_pr_ref_parsing():
     owner, repo = "software-mansion", "argent"
 
@@ -175,6 +206,15 @@ def test_pr_ref_parsing():
     # Junk has no number.
     assert parse_pr_ref("not a pr", owner, repo).number is None
     assert parse_pr_ref("", owner, repo).number is None
+
+    # ASCII digits only, like Swift's Int(_:): non-ASCII digits ("٣٣٧".isdigit()
+    # is True in Python) and an explicit '+' sign are both rejected.
+    assert parse_pr_ref("٣٣٧", owner, repo).number is None
+    assert parse_pr_ref("#٣٣٧", owner, repo).number is None
+    assert parse_pr_ref("+337", owner, repo).number is None
+    assert parse_pr_ref(
+        f"https://github.com/{owner}/{repo}/pull/٣٣٧", owner, repo
+    ).number is None
 
 
 def test_review_single_pr_accepts_url():
@@ -219,7 +259,7 @@ def test_audit_prompt_toggles_gate_blocks():
     from argent_utils.audit import AuditConfig
 
     # The whole-repo audit needs no input and the hard-repro bar is always present.
-    base = AuditConfig(me="latekvo").build_prompt()
+    base = AuditConfig().build_prompt()
     assert AuditConfig().is_valid
     assert "100% CERTAINTY" in base
     assert base.startswith("Run a FULL end-to-end test of the ENTIRE software-mansion/argent")

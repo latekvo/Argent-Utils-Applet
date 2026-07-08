@@ -12,13 +12,17 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+# PR numbers are ASCII digits only ([0-9], not \d): Python's \d / str.isdigit()
+# also match non-ASCII digits like "٣٣٧", which Swift's Int(_:) rejects.
 # github.com/OWNER/REPO/pull/N — scheme/www optional, trailing path/query allowed.
 _URL = re.compile(
-    r"(?:https?://)?(?:www\.)?github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)",
+    r"(?:https?://)?(?:www\.)?github\.com/([\w.-]+)/([\w.-]+)/pull/([0-9]+)",
     re.IGNORECASE,
 )
 # OWNER/REPO#N shorthand (whole string).
-_SHORTHAND = re.compile(r"^([\w.-]+)/([\w.-]+)#(\d+)$")
+_SHORTHAND = re.compile(r"^([\w.-]+)/([\w.-]+)#([0-9]+)$")
+# A bare PR number (after any leading '#' is stripped).
+_BARE_NUMBER = re.compile(r"^[0-9]+$")
 
 
 @dataclass(frozen=True)
@@ -50,7 +54,7 @@ def parse_pr_ref(raw: str, owner: str, repo: str) -> PRRef:
         return PRRef(n if n > 0 else None, not matches)
 
     bare = s[1:] if s.startswith("#") else s
-    if bare.isdigit() and int(bare) > 0:
+    if _BARE_NUMBER.match(bare) and int(bare) > 0:
         return PRRef(int(bare), False)
 
     return PRRef(None, False)

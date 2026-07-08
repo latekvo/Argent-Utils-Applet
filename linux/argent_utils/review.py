@@ -2,7 +2,10 @@
 
 The prompt text (depth fragments, scope templates, action blocks) all comes from
 the shared ``core/review.json``; only the *assembly* order/conditions live here
-as a thin glue layer, identical to ReviewWizard.swift's ``buildPrompt``.
+as a thin glue layer, mirroring ReviewConfig's ``buildPrompt`` in
+ArgentUtilsCore/Review.swift (this port covers the sweep and author-unknown
+single-PR paths; the known-mine/known-theirs single-PR prompts back macOS-only
+monitors and are not ported).
 
 The terminal spawner is the Linux analogue of the macOS AppleScript/iTerm path:
 it opens a new terminal-emulator window running ``claude "<prompt>"`` detached
@@ -97,6 +100,14 @@ class ReviewConfig:
     def can_reply_to_reviews(self) -> bool:
         return self.target != PRTarget.SOMEONE
 
+    # The final approve/changes-requested verdict is a reviewer's call, so it never
+    # applies to my own PRs (Swift: canFinalPass = disposition != .mine). A specific
+    # PR's author is unknown here (the Linux port only has the author-gated prompt,
+    # Swift's `.unknown` disposition), which leaves the toggle available.
+    @property
+    def can_final_pass(self) -> bool:
+        return self.target != PRTarget.MINE
+
     @property
     def eff_mark_ready(self) -> bool:
         return self.mark_ready and self.can_mark_ready
@@ -108,6 +119,10 @@ class ReviewConfig:
     @property
     def eff_reply_to_reviews(self) -> bool:
         return self.reply_to_reviews and self.can_reply_to_reviews
+
+    @property
+    def eff_final_pass(self) -> bool:
+        return self.final_pass and self.can_final_pass
 
     # Review exactly one PR by number/URL instead of a whose-PRs sweep.
     @property
@@ -165,8 +180,17 @@ class ReviewConfig:
 
         blocks: list[str] = []
         tmpl = s["scopeMine"] if self.target == PRTarget.MINE else s["scopeOther"]
-        scope = tmpl.format(prKind=self._pr_kind, handle=self.author_handle)
-        blocks.append(s["multi"].format(scope=scope, owner=owner, repo=repo))
+        # Targeted replaces (not str.format) so literal braces in the shared
+        # templates can never crash the builder — mirrors the Swift side.
+        scope = tmpl.replace("{prKind}", self._pr_kind).replace(
+            "{handle}", self.author_handle
+        )
+        blocks.append(
+            s["multi"]
+            .replace("{scope}", scope)
+            .replace("{owner}", owner)
+            .replace("{repo}", repo)
+        )
 
         # For someone else's PRs, frame the whole task as look-don't-touch up front.
         if self.is_review_only:
@@ -193,7 +217,7 @@ class ReviewConfig:
         # for someone else's branch, which we don't touch.
         if not self.is_review_only:
             blocks.append(blocks_src["noAttribution"])
-        if self.final_pass:
+        if self.eff_final_pass:
             blocks.append(blocks_src["finalPass"])
         return "\n\n".join(blocks)
 
@@ -204,8 +228,10 @@ class ReviewConfig:
         CASE A (mine -> fix on the branch, mark clean ready, reply, no AI attribution)
         and CASE B (theirs -> review only, never touch the branch, leave a formal
         review, and explicitly DO NOT mark it ready). The action sub-blocks are gated
-        by the same toggles the wizard exposes. Identical to Review.swift's
-        ``buildSpecificPrompt``.
+        by the same toggles the wizard exposes. Matches Review.swift's
+        ``buildSpecificPrompt`` — the author-unknown tier only; Swift's known-mine /
+        known-theirs single-PR prompts serve macOS-only monitors and have no Linux
+        counterpart.
         """
         s = core.review()["scope"]
         blocks_src = core.review()["blocks"]
@@ -214,8 +240,11 @@ class ReviewConfig:
         handle = self.me or "me"
 
         def fill(text: str) -> str:
-            return text.format(
-                pr=self.pr_ref.number_string, owner=owner, repo=repo, me=handle
+            return (
+                text.replace("{pr}", self.pr_ref.number_string)
+                .replace("{owner}", owner)
+                .replace("{repo}", repo)
+                .replace("{me}", handle)
             )
 
         blocks: list[str] = [fill(s["single"]), fill(specific["determineAuthor"])]
@@ -229,21 +258,21 @@ class ReviewConfig:
         on_branch = depth.get("onBranch")
         if on_branch:
             blocks.append(on_branch)
-        if self.mark_ready:
+        if self.eff_mark_ready:
             blocks.append(blocks_src["markReady"])
-        if self.reply_to_reviews:
+        if self.eff_reply_to_reviews:
             blocks.append(blocks_src["reply"])
         blocks.append(blocks_src["noAttribution"])
 
         # CASE B — it's someone else's: review only, hands off the branch.
         blocks.append(fill(specific["otherHeader"]))
         blocks.append(blocks_src["reviewOnly"])
-        if self.leave_reviews:
+        if self.eff_leave_reviews:
             blocks.append(blocks_src["leaveReviews"])
         blocks.append(fill(specific["otherNoMarkReady"]))
 
         blocks.append(blocks_src["trailer"])
-        if self.final_pass:
+        if self.eff_final_pass:
             blocks.append(blocks_src["finalPass"])
         return "\n\n".join(b for b in blocks if b)
 

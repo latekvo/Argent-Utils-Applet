@@ -196,6 +196,9 @@ class WizardView(QWidget):
         self.mark_ready.setEnabled(cfg.can_mark_ready)
         self.leave_reviews.setEnabled(cfg.can_leave_reviews)
         self.reply.setEnabled(cfg.can_reply_to_reviews)
+        # The final verdict never applies to my own PRs; hide the row entirely,
+        # matching the macOS wizard (`if config.canFinalPass { finalPassRow }`).
+        self.final_pass.setVisible(cfg.can_final_pass)
 
         self.spawn_btn.setEnabled(cfg.is_valid)
         tint = _TINT if cfg.is_valid else "#888888"

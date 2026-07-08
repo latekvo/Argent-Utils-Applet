@@ -66,15 +66,27 @@ class ConflictConfig:
         blocks_src = c["blocks"]
         blocks: list[str] = []
 
+        # Targeted replaces (not str.format) so literal braces in the shared
+        # templates can never crash the builder — mirrors the Swift side.
         if self.is_single_pr:
-            blocks.append(s["single"].format(pr=self.pr_ref.number_string, owner=owner, repo=repo))
+            blocks.append(
+                s["single"]
+                .replace("{pr}", self.pr_ref.number_string)
+                .replace("{owner}", owner)
+                .replace("{repo}", repo)
+            )
         else:
             tmpl = s["scopeMine"] if self.target == Target.MINE else s["scopeOther"]
-            scope = tmpl.format(handle=self.author_handle)
-            blocks.append(s["multi"].format(scope=scope, owner=owner, repo=repo))
+            scope = tmpl.replace("{handle}", self.author_handle)
+            blocks.append(
+                s["multi"]
+                .replace("{scope}", scope)
+                .replace("{owner}", owner)
+                .replace("{repo}", repo)
+            )
 
         lead = "Merge" if self.is_single_pr else "For each, merge"
-        blocks.append(blocks_src["merge"].format(lead=lead))
+        blocks.append(blocks_src["merge"].replace("{lead}", lead))
         blocks.append(blocks_src["bar"])
         blocks.append(blocks_src["summary"])
         blocks.append(blocks_src["trailer"])

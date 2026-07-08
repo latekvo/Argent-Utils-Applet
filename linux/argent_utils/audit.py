@@ -23,7 +23,6 @@ from . import core
 
 @dataclass
 class AuditConfig:
-    me: str = ""  # authenticated viewer login, used as the @handle for authoring
     fix_issues: bool = False
     open_prs: bool = False
 
@@ -43,7 +42,9 @@ class AuditConfig:
         blocks_src = core.audit()["blocks"]
 
         def fill(s: str) -> str:
-            return s.format(owner=owner, repo=repo)
+            # Targeted replaces (not str.format) so literal braces in the shared
+            # templates can never crash the builder — mirrors the Swift side.
+            return s.replace("{owner}", owner).replace("{repo}", repo)
 
         blocks: list[str] = [fill(blocks_src["intro"]), fill(blocks_src["bar"])]
         # Always: classify every finding H/M/L (drives the report + the Low<20-LOC PR gate).

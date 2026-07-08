@@ -101,7 +101,6 @@ class AuditWizardView(QWidget):
 
     def _config(self) -> audit.AuditConfig:
         return audit.AuditConfig(
-            me=self.store.effective_me,
             fix_issues=self.fix_issues.isChecked(),
             open_prs=self.open_prs.isChecked(),
         )
