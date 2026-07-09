@@ -35,6 +35,14 @@ enum AgentSpawner {
     /// best-effort (`;`, not `&&`) so `claude` still starts if it ever moves.
     static let repoPath = "/Users/ignacylatka/dev/argent"
 
+    /// Seconds between OPENING the terminal window and TYPING the command into it.
+    /// A freshly created window's shell is still initializing, and input written
+    /// immediately is silently discarded about half the time (zsh resets its line
+    /// editor during startup) — the agent then never launches. The WHOLE command
+    /// waits, not just its trailing newline. Every spawn call site is detached, so
+    /// the in-script `delay` never blocks the UI.
+    static let inputSettleDelay = 5
+
     /// Resolve the terminal to actually drive: the preferred one if installed,
     /// else the first installed alternative, else Terminal.app (always present).
     static func resolved(_ preferred: SpawnTerminal) -> SpawnTerminal {
@@ -130,9 +138,11 @@ enum AgentSpawner {
         "cd \(shq(repoPath)) 2>/dev/null; claude \"$(cat \(shq(promptFile.path)))\"; printf %s $? > \(shq(donePath))"
     }
 
-    /// Wrap the shell command in an "open a new window, run this, and report the
-    /// window id / session id / tty" script for the given terminal. The trailing
-    /// `return …` line makes osascript print `wid|sid|tty` on stdout.
+    /// Wrap the shell command in an "open a new window, settle, run this, and report
+    /// the window id / session id / tty" script for the given terminal. The trailing
+    /// `return …` line makes osascript print `wid|sid|tty` on stdout. Both variants
+    /// open the window FIRST, capture the handles, `delay` for `inputSettleDelay`,
+    /// and only then type the command (see the constant's doc for why).
     static func appleScript(for term: SpawnTerminal, shellCommand cmd: String) -> String {
         let esc = cmd
             .replacingOccurrences(of: "\\", with: "\\\\")
@@ -146,11 +156,14 @@ enum AgentSpawner {
                 set _sid to ""
                 set _tty to ""
                 tell current session of w
-                    write text "\(esc)"
                     set _tty to tty
                     set _sid to id
                 end tell
                 set _wid to (id of w) as string
+                delay \(inputSettleDelay)
+                tell current session of w
+                    write text "\(esc)"
+                end tell
             end tell
             return _wid & "|" & _sid & "|" & _tty
             """
@@ -158,9 +171,11 @@ enum AgentSpawner {
             return """
             tell application "Terminal"
                 activate
-                set _tab to do script "\(esc)"
+                set _tab to do script ""
                 set _tty to tty of _tab
                 set _wid to (id of front window) as string
+                delay \(inputSettleDelay)
+                do script "\(esc)" in _tab
             end tell
             return _wid & "||" & _tty
             """

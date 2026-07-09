@@ -307,13 +307,23 @@ enum Dump {
         }
         print("== api-error scan: \(sessions.count) terminal session(s) ==\n")
         for s in sessions {
-            let hit = ApiErrorMatch.looksLikeApiError(s.tail)
+            let kind = ApiErrorMatch.classify(s.tail)
+            let mark: String
+            switch kind {
+            case .transient: mark = "⚠️ MATCH"
+            case .quota:
+                let reset = ApiErrorMatch.quotaResetDate(in: s.tail, after: Date())
+                    .map { " (nudge after \($0))" } ?? " (reset unparseable — no nudge)"
+                mark = "⏳ QUOTA\(reset)"
+            case nil: mark = "  ok   "
+            }
             let last = s.tail.split(whereSeparator: \.isNewline).last.map(String.init) ?? ""
-            print("  \(hit ? "⚠️ MATCH" : "  ok   ")  \(s.tty)   last: \(last.prefix(70))")
+            print("  \(mark)  \(s.tty)   last: \(last.prefix(70))")
         }
-        let matches = sessions.filter { ApiErrorMatch.looksLikeApiError($0.tail) }
+        let matches = sessions.filter { ApiErrorMatch.classify($0.tail) == .transient }
         print("\n\(matches.count) session(s) would receive: "
-            + "\"\(ApiErrorWatcher.continueMessage)\"  (dry-run — nothing sent)")
+            + "\"\(ApiErrorWatcher.continueMessage)\"  (dry-run — nothing sent; "
+            + "quota stalls are nudged only after their limit resets)")
     }
 
     /// Auto-fix monitor self-test: fetch my open PRs in the target repo (real gh),

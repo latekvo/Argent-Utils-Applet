@@ -158,6 +158,15 @@ struct SettingsView: View {
 
     // MARK: Claude API-error watcher
 
+    private var apiWatchBlurb: String {
+        let base = "Watches every iTerm/Terminal session; when a Claude API error shows up "
+            + "(e.g. \u{201C}529 Overloaded\u{201D}), it sends \u{201C}\(ApiErrorWatcher.continueMessage)\u{201D} "
+            + "so a stalled agent resumes on its own. An out-of-quota stall "
+            + "(\u{201C}You've hit your weekly limit\u{201D}) is nudged only after the limit provably resets."
+        let count = store.apiWatchContinues > 0 ? "  Continued \(store.apiWatchContinues)× so far." : ""
+        return base + count
+    }
+
     private var apiWatchSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             sectionLabel("CLAUDE API ERRORS")
@@ -166,10 +175,7 @@ struct SettingsView: View {
             }
             .toggleStyle(.switch)
             .controlSize(.small)
-            Text("Watches every iTerm/Terminal session; when a Claude API error shows up "
-                 + "(e.g. \u{201C}529 Overloaded\u{201D}), it sends \u{201C}\(ApiErrorWatcher.continueMessage)\u{201D} "
-                 + "so a stalled agent resumes on its own."
-                 + (store.apiWatchContinues > 0 ? "  Continued \(store.apiWatchContinues)× so far." : ""))
+            Text(apiWatchBlurb)
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
