@@ -439,6 +439,29 @@ check(!ApiErrorMatch.looksLikeApiError("the retry limit was reached, giving up")
 check(!ApiErrorMatch.looksLikeApiError(""))
 print("api-error match assertions passed")
 
+// ---- Activity-feed category taxonomy (panel filter chips) ----
+section("audit category")
+check(AuditCategory.of(action: "review") == .review)
+check(AuditCategory.of(action: "review-req") == .review, "auto review-request groups under Reviews")
+check(AuditCategory.of(action: "review-reply") == .reply, "my-PR review responses are their own type")
+check(AuditCategory.of(action: "conflicts") == .conflicts)
+check(AuditCategory.of(action: "audit") == .audit)
+check(AuditCategory.of(action: "nudge") == .apiRestart, "API-error nudge is the API-restart type")
+check(AuditCategory.of(action: "merge") == .merge)
+check(AuditCategory.of(action: "merge-failed") == .merge)
+check(AuditCategory.of(action: "ban") == .moderation)
+check(AuditCategory.of(action: "unban") == .moderation)
+// Device / health / anything unmapped falls through to System so no row is uncategorized.
+check(AuditCategory.of(action: "kill-device") == .system)
+check(AuditCategory.of(action: "repair-done") == .system)
+check(AuditCategory.of(action: "allocator-install") == .system)
+check(AuditCategory.of(action: "poll-failed") == .system)
+check(AuditCategory.of(action: "spawn-failed") == .system)
+check(AuditCategory.of(action: "warn") == .system)
+check(AuditCategory.of(action: "totally-new-verb") == .system, "unknown verbs never vanish")
+check(AuditCategory.displayOrder.count == AuditCategory.allCases.count)
+print("audit category assertions passed")
+
 // ---- Golden prompts (cross-platform parity) ----
 // Every prompt mode both front-ends can assemble is compared byte-for-byte against a
 // committed golden file in core/golden-prompts/. The Linux tests assert the SAME

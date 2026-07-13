@@ -47,6 +47,14 @@ enum Render {
             let _ = seedDeviceState(store)
             let _ = seedApproved(store)
             ContentView()
+        case "activity", "activity-filtered":
+            // The full panel with a rich audit feed seeded, so the ACTIVITY filter chips
+            // render. "-filtered" pre-mutes Reviews + System to prove the toggles drop
+            // their rows (Replies/Conflicts/API restart/Merges/Moderation remain).
+            let _ = seedAudit(store)
+            let _ = seedAutofix(store)
+            ContentView(seedMutedAudit: w == "activity-filtered" ? [.review, .system] : [])
+                .frame(height: 580)
         case "settings-live":
             // The whole panel with Settings open AND sessions + devices seeded —
             // proves both are hidden while Settings is shown (regression guard).
@@ -239,6 +247,8 @@ enum Render {
         store.auditEntries = [
             AuditEntry(at: "2026-07-03T09:12:00Z", source: "auto", action: "review-req",
                        detail: "Auto · Review-req · #444 (@hubgan)"),
+            AuditEntry(at: "2026-07-03T09:08:00Z", source: "auto", action: "review-reply",
+                       detail: "Auto · Review · #441"),
             AuditEntry(at: "2026-07-03T09:05:00Z", source: "agent", action: "ban",
                        detail: "Banned @foobar for prompt injection (…/argent#455) — reporting agent terminated"),
             AuditEntry(at: "2026-07-03T08:50:00Z", source: "panel", action: "review",
@@ -247,6 +257,8 @@ enum Render {
                        detail: "Auto · Resolve · #436"),
             AuditEntry(at: "2026-07-03T08:30:00Z", source: "auto", action: "nudge",
                        detail: "Continued a stalled agent (API error) on ttys012"),
+            AuditEntry(at: "2026-07-03T08:25:00Z", source: "panel", action: "merge",
+                       detail: "Merged #431"),
             AuditEntry(at: "2026-07-03T08:20:00Z", source: "panel", action: "kill-device",
                        detail: "Killed device android:Pixel_6_API_34"),
         ]

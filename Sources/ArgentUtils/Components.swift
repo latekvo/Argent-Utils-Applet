@@ -62,6 +62,50 @@ struct SectionHeader: View {
     }
 }
 
+/// A left-to-right flow layout that wraps to the next line when the row is full — used
+/// for the Activity filter chips, whose count and width vary with the feed. SwiftUI has
+/// no built-in wrapping stack; this is the minimal `Layout` conformance (macOS 13+).
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 4
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var rowWidth: CGFloat = 0, rowHeight: CGFloat = 0
+        var totalWidth: CGFloat = 0, totalHeight: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            // Wrap: this subview would overflow the current row.
+            if rowWidth > 0, rowWidth + spacing + size.width > maxWidth {
+                totalWidth = max(totalWidth, rowWidth)
+                totalHeight += rowHeight + spacing
+                rowWidth = 0
+                rowHeight = 0
+            }
+            rowWidth += (rowWidth > 0 ? spacing : 0) + size.width
+            rowHeight = max(rowHeight, size.height)
+        }
+        totalWidth = max(totalWidth, rowWidth)
+        totalHeight += rowHeight
+        return CGSize(width: totalWidth, height: totalHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Void) {
+        var x = bounds.minX, y = bounds.minY, rowHeight: CGFloat = 0
+        for view in subviews {
+            let size = view.sizeThatFits(.unspecified)
+            if x > bounds.minX, x + size.width > bounds.maxX {
+                x = bounds.minX
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            view.place(at: CGPoint(x: x, y: y), anchor: .topLeading,
+                       proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+    }
+}
+
 /// One grid-cell card: icon badge, title/subtitle, and a caller-supplied trailing
 /// view (a count for tool cards, a chevron for action cards). A real Button — the
 /// cards used to be plain views with `.onTapGesture`, which gave the panel's primary

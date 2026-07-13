@@ -384,14 +384,19 @@ final class Store: ObservableObject {
 
     /// Register a freshly spawned agent session for tracking, and record it in the audit
     /// log. `source` is "panel" (a wizard SPAWN) or "auto" (a monitor dispatch).
+    ///
+    /// `kind` drives the tracked-session row's tint; `auditAction` (defaulting to `kind`)
+    /// is the verb written to the activity feed. They're decoupled so a review-reply agent
+    /// can log a distinct `review-reply` action — feeding the Activity filter its own
+    /// "Replies" category — while still rendering as a plain review session.
     func track(kind: String, label: String, prURL: String?, result: AgentSpawner.SpawnResult,
-               source: String = "panel") {
+               source: String = "panel", auditAction: String? = nil) {
         let p = TrackedProcess(kind: kind, label: label,
                                terminal: result.terminal.rawValue,
                                windowID: result.windowID, sessionID: result.sessionID,
                                tty: result.tty, donePath: result.donePath, prURL: prURL)
         processes.append(p)
-        AuditLog.log(source, kind, label)
+        AuditLog.log(source, auditAction ?? kind, label)
     }
 
     /// Remove one tracked session from the list (the row's ✕ button).
@@ -714,7 +719,7 @@ final class Store: ObservableObject {
             }
             let retry = attemptNumber > 1 ? " · retry \(attemptNumber)" : ""
             track(kind: "review", label: "Auto · Review-req · #\(r.number) (@\(r.author))\(tag)\(retry)",
-                  prURL: r.url, result: result, source: "auto")
+                  prURL: r.url, result: result, source: "auto", auditAction: "review-req")
             // Retries of the same review are re-dispatches, not new reviews handled —
             // count each review once or the Settings tally overclaims.
             if attemptNumber == 1 { reviewRequestsHandled += 1 }
@@ -816,7 +821,7 @@ final class Store: ObservableObject {
             }.value
             let retry = attemptNumber > 1 ? " · retry \(attemptNumber)" : ""
             track(kind: "review", label: "Auto · Review · #\(s.number)\(retry)",
-                  prURL: s.url, result: result, source: "auto")
+                  prURL: s.url, result: result, source: "auto", auditAction: "review-reply")
             if attemptNumber == 1 { autofixReviewsHandled += 1 }
             return true
         } catch {

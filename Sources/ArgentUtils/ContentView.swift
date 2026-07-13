@@ -259,9 +259,13 @@ struct ContentView: View {
     /// `showSettings` seeds the initial settings state — used by the headless render
     /// to snapshot the Settings screen in context. Defaults to the main view.
     /// `seedPendingUnban` seeds the inline un-ban confirmation for a login (render only).
-    init(showSettings: Bool = false, seedPendingUnban: String? = nil) {
+    /// `seedMutedAudit` pre-mutes Activity filter categories so the filtered feed can be
+    /// snapshotted (render only).
+    init(showSettings: Bool = false, seedPendingUnban: String? = nil,
+         seedMutedAudit: Set<AuditCategory> = []) {
         _showingSettings = State(initialValue: showSettings)
         _pendingUnban = State(initialValue: seedPendingUnban)
+        _mutedAuditCategories = State(initialValue: seedMutedAudit)
     }
     /// Which action wizard (if any) replaces the tool lists in the results pane.
     @State private var activeAction: ActionPanel?
@@ -269,6 +273,10 @@ struct ContentView: View {
     @State private var bannedExpanded = true
     /// Whether the activity/audit log is expanded.
     @State private var auditExpanded = true
+    /// Activity categories the user has toggled OFF via the filter chips. Empty ⇒ show
+    /// everything (the default), so a category that only appears later still shows until
+    /// it's explicitly muted. Persisted for the popover's lifetime, reset on relaunch.
+    @State private var mutedAuditCategories: Set<AuditCategory> = []
     /// The login whose un-ban is awaiting inline confirmation (nil = none). Kept inline
     /// in the popover rather than an NSAlert, which would open behind the menu-bar window.
     @State private var pendingUnban: String?
@@ -443,18 +451,72 @@ struct ContentView: View {
     // MARK: activity / audit log
 
     /// Collapsible unified activity feed — every action, whether triggered from the panel
-    /// or dispatched automatically (or reported by an agent). Newest first.
+    /// or dispatched automatically (or reported by an agent). Newest first, filterable by
+    /// activity type via the toggle chips.
     @ViewBuilder
     private func auditList(_ entries: [AuditEntry]) -> some View {
+        // Per-category counts over the whole feed drive both the chips and their badges.
+        let counts = Dictionary(grouping: entries) { AuditCategory.of(action: $0.action) }
+            .mapValues(\.count)
+        let present = AuditCategory.displayOrder.filter { counts[$0] != nil }
+        let visible = entries.filter { !mutedAuditCategories.contains(AuditCategory.of(action: $0.action)) }
         VStack(alignment: .leading, spacing: 4) {
-            SectionHeader(title: "ACTIVITY", count: entries.count, expanded: $auditExpanded,
-                          icon: "list.bullet.rectangle")
+            SectionHeader(title: "ACTIVITY", count: visible.count, expanded: $auditExpanded,
+                          icon: "list.bullet.rectangle",
+                          caption: mutedAuditCategories.isEmpty ? nil : "filtered")
             if auditExpanded {
-                ForEach(entries.prefix(30)) { entry in AuditRow(entry: entry) }
+                // Only worth filtering when there's more than one type in view.
+                if present.count > 1 { auditFilterChips(present, counts: counts) }
+                ForEach(visible.prefix(30)) { entry in AuditRow(entry: entry) }
             }
         }
         .padding(7)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.07)))
+    }
+
+    /// Wrapping row of toggle chips, one per activity type present in the feed. A lit chip
+    /// (tinted) includes that type; tapping mutes it (dimmed) and drops its rows.
+    @ViewBuilder
+    private func auditFilterChips(_ present: [AuditCategory], counts: [AuditCategory: Int]) -> some View {
+        FlowLayout(spacing: 4) {
+            ForEach(present, id: \.self) { cat in
+                let on = !mutedAuditCategories.contains(cat)
+                Button {
+                    if on { mutedAuditCategories.insert(cat) } else { mutedAuditCategories.remove(cat) }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: cat.symbol).font(.system(size: 8, weight: .bold))
+                        Text(cat.title).font(.system(size: 9, weight: .medium))
+                        Text("\(counts[cat] ?? 0)").font(.system(size: 8).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .foregroundStyle(on ? auditCategoryTint(cat) : Color.secondary)
+                    .background(Capsule().fill((on ? auditCategoryTint(cat) : Color.gray).opacity(on ? 0.16 : 0.08)))
+                    .overlay(Capsule().stroke(on ? auditCategoryTint(cat).opacity(0.5) : .clear, lineWidth: 1))
+                    .opacity(on ? 1 : 0.55)
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(on ? "Hide \(cat.title.lowercased())" : "Show \(cat.title.lowercased())")
+            }
+        }
+        .padding(.bottom, 2)
+    }
+
+    /// Chip tint per activity type. Mirrors the tool/session palette so a category reads
+    /// the same color it does elsewhere in the panel (reviews pink, conflicts cyan, …).
+    private func auditCategoryTint(_ cat: AuditCategory) -> Color {
+        switch cat {
+        case .review:     return .pink
+        case .reply:      return .purple
+        case .conflicts:  return .cyan
+        case .audit:      return .indigo
+        case .apiRestart: return .orange
+        case .merge:      return .green
+        case .moderation: return .red
+        case .system:     return .gray
+        }
     }
 
     // MARK: ongoing agent sessions
@@ -1029,6 +1091,7 @@ private struct AuditRow: View {
     private var icon: String {
         switch entry.action {
         case "review", "review-req": return "checklist"
+        case "review-reply":         return "arrowshape.turn.up.left.fill"
         case "conflicts":            return "arrow.triangle.merge"
         case "audit":                return "ladybug.fill"
         case "nudge":                return "bolt.fill"
