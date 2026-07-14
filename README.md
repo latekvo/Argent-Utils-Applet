@@ -137,6 +137,50 @@ fix; off = a strictly read-only audit).
 
 > Preview: `ARGENT_UTILS_PRINT_PROMPT=audit swift run ArgentUtils` (also `=audit-issues`, `=audit-prs`, `=audit-all`).
 
+## Argent Mesh (experimental) — LAN P2P duty coordination
+
+With several machines on one desk (say a Linux box and two MacBooks), the
+wrench's grunt work shouldn't all land on the laptop you're typing on. **Argent
+Mesh** makes the machines coordinate: every node self-discovers its peers over
+UDP (multicast + subnet broadcast), holds heartbeat TCP links, and gossips its
+status — platform, a user-set machine *tier* (1 = strongest), and token
+availability (🟢 ok / 🟡 low / 🔴 out).
+
+On top of that shared view, every node runs the same **deterministic duty
+assignment** — no leader, no election, no split-brain: identical inputs give
+identical answers everywhere, so the moment a machine dies (heartbeat timeout)
+or runs out of tokens, every survivor has *already* agreed where each duty
+moved. Duties are the three spawn actions, each with a configurable placement:
+
+- **Review PRs / Resolve conflicts** — default *weakest-first*: route to the
+  weakest eligible machine and keep the strong ones free for interactive work.
+- **Full E2E test** — a platform *spread*: one Linux node **and** one macOS
+  node run the bundle E2E, each slot failing over within its platform.
+
+Dispatching routes a staged prompt to the chosen node over the mesh; the
+receiving machine opens its own terminal running `claude` exactly like a local
+SPAWN AGENT (dispatches are the `📤/📥 mesh` rows in the activity feed). If the
+first target declines — gone, or out of tokens — the dispatch fails over to the
+next candidate by rank.
+
+The Linux applet grows a collapsible **topology column**: the live node graph
+(link states), per-node tier/token editors (editing a *remote* node forwards
+over the mesh, so one panel configures the whole fleet), and per-duty strategy
++ token-awareness controls (gossiped last-writer-wins). The mesh node itself is
+stdlib-only Python — the MacBooks run it headless until a Swift port exists:
+
+```bash
+cd linux
+python3 -m argent_utils.mesh --daemon      # join the mesh (any OS, no Qt needed)
+python3 -m argent_utils.mesh --status      # live topology + duty assignments
+python3 -m argent_utils.mesh --set tokens=out          # "this machine is out of tokens"
+python3 -m argent_utils.mesh --dispatch review --prompt "…"   # route a job
+```
+
+Model + constants live in [`core/mesh.json`](core/mesh.json); node state in
+`~/.argent/mesh/` (`node.json` identity, `state.json` topology snapshot — the
+device-allocator pattern).
+
 ## Autonomous monitors (macOS)
 
 The macOS applet doesn't just render lists - it acts on them. Three background
@@ -384,4 +428,7 @@ Sources/
     Color+Hex.swift              Color ↔ "#RRGGBB" for persisted tint overrides
   ArgentUtilsCoreSmoke/        ← Linux-buildable core self-test (filters + prompts + golden files + live dump)
 linux/                         ← Linux Qt6/PySide6 tray applet (see linux/README.md)
+  argent_utils/mesh/           ← Argent Mesh node: stdlib-only Python (runs headless on macOS too) — LAN
+                                 discovery, heartbeat links, gossip, deterministic duty assignment,
+                                 dispatch with failover; model in core/mesh.json, state in ~/.argent/mesh/
 ```

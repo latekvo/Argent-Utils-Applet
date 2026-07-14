@@ -23,6 +23,7 @@ threshold in one file and both platforms pick it up; the golden-prompt tests
 | `review.json` | the Review-PRs prompt model: depth levels + scope/action text blocks the wizard assembles |
 | `conflicts.json` | the Resolve-conflicts prompt model: scope templates + the merge/resolve action blocks the wizard assembles |
 | `audit.json` | the Full-E2E-test prompt model: scope + action blocks (find-only / fix open bug issues / open a PR per finding) |
+| `mesh.json` | the LAN P2P mesh model: protocol constants (discovery/heartbeat ports + timings), the duty catalog (which job classes the mesh routes, with per-duty platform spread — e.g. the audit's one-linux-plus-one-macos), and the placement strategies (weakest-first / strongest-first / local-first). Consumed by the Python mesh node (`linux/argent_utils/mesh`) and the topology panel; a future Swift node reads the same file |
 | `golden-prompts/` | canonical prompt outputs, one `.txt` per mode; regenerate with `ARGENT_GOLDEN_WRITE=1 swift run ArgentUtilsCoreSmoke`, asserted byte-for-byte by the Swift smoke test AND `linux/tests/test_golden_prompts.py` |
 
 ## Contract notes
