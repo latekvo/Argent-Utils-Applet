@@ -17,14 +17,14 @@
   },
 
   "platforms": [
-    { "id": "linux", "title": "Linux", "emoji": "🐧", "colorHex": "#FF9500" },
-    { "id": "macos", "title": "macOS", "emoji": "🍎", "colorHex": "#0A84FF" }
+    { "id": "linux", "title": "Linux", "emoji": "🐧", "linuxGlyph": "⬢", "colorHex": "#FF9500" },
+    { "id": "macos", "title": "macOS", "emoji": "🍎", "linuxGlyph": "◆", "colorHex": "#0A84FF" }
   ],
 
   "tokens": [
-    { "id": "ok", "title": "tokens OK", "emoji": "🟢", "colorHex": "#34C759" },
-    { "id": "low", "title": "tokens low", "emoji": "🟡", "colorHex": "#FF9500" },
-    { "id": "out", "title": "out of tokens", "emoji": "🔴", "colorHex": "#FF3B30" }
+    { "id": "ok", "title": "tokens OK", "emoji": "🟢", "linuxGlyph": "●", "colorHex": "#34C759" },
+    { "id": "low", "title": "tokens low", "emoji": "🟡", "linuxGlyph": "◐", "colorHex": "#FF9500" },
+    { "id": "out", "title": "out of tokens", "emoji": "🔴", "linuxGlyph": "○", "colorHex": "#FF3B30" }
   ],
 
   "tiers": {
@@ -58,6 +58,7 @@
       "id": "review",
       "title": "Review PRs",
       "emoji": "✅",
+      "linuxGlyph": "☑",
       "colorHex": "#FF2D78",
       "placement": { "strategy": "weakest-first", "tokenAware": true, "spread": [] }
     },
@@ -65,6 +66,7 @@
       "id": "conflicts",
       "title": "Resolve conflicts",
       "emoji": "🔀",
+      "linuxGlyph": "⋔",
       "colorHex": "#32ADE6",
       "placement": { "strategy": "weakest-first", "tokenAware": true, "spread": [] }
     },
@@ -72,6 +74,7 @@
       "id": "audit",
       "title": "Full E2E test",
       "emoji": "🐞",
+      "linuxGlyph": "◉",
       "colorHex": "#5856D6",
       "placement": {
         "_comment": "The bundle E2E runs on one Linux AND one macOS node — platform coverage beats machine preference here. An empty spread means 'any one node'.",

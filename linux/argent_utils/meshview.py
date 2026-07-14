@@ -30,17 +30,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import core
+from . import core, glyphs
 from .mesh import config as mesh_config
 from .mesh import statefile
 from .mesh.config import PlacementOverrides
 from .store import Store
-from .widgets import ElidedLabel, tint_bg
+from .widgets import ElidedLabel, GlyphLabel, IconChip, tint_bg
 
 # Link-state colours (shared with the wire graph + the node badges). Mirrors the
 # duty/token palette in core/mesh.json so the whole feature reads as one thing.
 _LINK_COLOR = {"up": "#34C759", "stale": "#FF9500", "down": "#FF3B30"}
-_TOKEN_EMOJI = {t["id"]: t["emoji"] for t in core.mesh()["tokens"]}
+# Monochrome token glyph + colour, read straight from the shared model (like
+# activity.py reads linuxGlyph) so the combo tints like the rest of the applet.
+_TOKEN_GLYPH = {t["id"]: t.get("linuxGlyph", t["emoji"]) for t in core.mesh()["tokens"]}
+_TOKEN_COLOR = {t["id"]: t["colorHex"] for t in core.mesh()["tokens"]}
 _TOKEN_ORDER = [t["id"] for t in core.mesh()["tokens"]]
 
 
@@ -56,11 +59,15 @@ def _clear_layout(layout) -> None:
 
 
 def _platform_meta(platform_id: str) -> tuple[str, str]:
-    """(emoji, colorHex) for a platform id, from the shared model."""
+    """(monochrome glyph, colorHex) for a platform id, from the shared model.
+
+    Reads the additive ``linuxGlyph`` field (like activity.py) so the mesh column
+    renders flat tinted glyphs instead of colour-emoji; falls back to a neutral
+    node glyph for an unknown platform."""
     for p in core.mesh()["platforms"]:
         if p["id"] == platform_id:
-            return p["emoji"], p["colorHex"]
-    return "🖥️", "#8E8E93"
+            return p.get("linuxGlyph", p["emoji"]), p["colorHex"]
+    return "⬢", "#8E8E93"
 
 
 # MARK: - wire graph
@@ -155,7 +162,7 @@ class TopologyGraph(QWidget):
 
     def _draw_node(self, painter: QPainter, x: float, y: float, node: dict,
                    *, is_self: bool) -> None:
-        emoji, color = _platform_meta(node.get("platform", ""))
+        glyph, color = _platform_meta(node.get("platform", ""))
         r = 15 if is_self else 12
         fill = QColor(color)
         if not is_self:
@@ -166,13 +173,13 @@ class TopologyGraph(QWidget):
         painter.setPen(pen)
         painter.drawEllipse(int(x - r), int(y - r), int(r * 2), int(r * 2))
 
-        # platform glyph inside the disc
+        # monochrome platform glyph inside the disc, white on the tint
         painter.setPen(QColor("white"))
         f = painter.font()
         f.setPixelSize(int(r * 0.95))
         painter.setFont(f)
         painter.drawText(int(x - r), int(y - r), int(r * 2), int(r * 2),
-                         int(Qt.AlignmentFlag.AlignCenter), emoji)
+                         int(Qt.AlignmentFlag.AlignCenter), glyph)
 
         # Name label, elided to a sane width. Placed on the OUTSIDE of the disc
         # relative to centre — above the disc for nodes in the top half, below
@@ -279,9 +286,7 @@ class MeshView(QWidget):
         row = QHBoxLayout()
         row.setContentsMargins(2, 0, 2, 0)
         row.setSpacing(6)
-        glyph = QLabel("🕸️")
-        glyph.setStyleSheet("font-size: 11px;")
-        row.addWidget(glyph)
+        row.addWidget(GlyphLabel(glyphs.G_MESH, 14, glyphs.MUTED, font_px=12))
         title = QLabel("MESH")
         title.setStyleSheet("color: palette(mid); font-weight: 700; font-size: 10px;")
         row.addWidget(title)
@@ -311,20 +316,20 @@ class MeshView(QWidget):
 
         # Off / empty / dead states — no live topology to render.
         if not self.store.mesh_enabled:
-            self._show_state("🕸️", "Mesh is off",
+            self._show_state(glyphs.G_MESH, "Mesh is off",
                              "Enable it in ⚙ Settings to coordinate duties with "
                              "other machines on this LAN.", None)
             self._set_status("gray", "off")
             self.node_count.setText("")
             return
         if state is None:
-            self._show_state("⏳", "Starting mesh node…",
+            self._show_state("⧗", "Starting mesh node…",
                              "Discovering peers on the LAN.", None)
             self._set_status("#FF9500", "starting")
             self.node_count.setText("")
             return
         if not running:
-            self._show_state("🛑", "Mesh node not running.",
+            self._show_state("⊘", "Mesh node not running.",
                              "The node process is gone. Start it to rejoin the mesh.",
                              "Start")
             self._set_status("#FF3B30", "node dead")
@@ -354,10 +359,8 @@ class MeshView(QWidget):
         self.state_host.setVisible(True)
         _clear_layout(self.state_col)
 
-        g = QLabel(glyph)
-        g.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        g.setStyleSheet("font-size: 26px;")
-        self.state_col.addWidget(g)
+        g = GlyphLabel(glyph, 34, glyphs.MUTED, font_px=28)
+        self.state_col.addWidget(g, 0, Qt.AlignmentFlag.AlignCenter)
         t = QLabel(title)
         t.setAlignment(Qt.AlignmentFlag.AlignCenter)
         t.setWordWrap(True)
@@ -394,7 +397,7 @@ class MeshView(QWidget):
         tier / token editors. ``peer`` is None for self, else the peer dict (its
         link/addr live there)."""
         node_id = node.get("id", "")
-        emoji, color = _platform_meta(node.get("platform", ""))
+        glyph, color = _platform_meta(node.get("platform", ""))
 
         card = QWidget()
         outer = QVBoxLayout(card)
@@ -407,13 +410,8 @@ class MeshView(QWidget):
         # Top row: chip · name · badge
         top = QHBoxLayout()
         top.setSpacing(6)
-        chip = QLabel(emoji)
-        chip.setFixedSize(20, 20)
-        chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        chip.setStyleSheet(
-            f"background-color: {tint_bg(color, 0.9)}; border-radius: 5px; font-size: 11px;"
-        )
-        top.addWidget(chip)
+        top.addWidget(IconChip(glyph, color, 20),
+                      0, Qt.AlignmentFlag.AlignVCenter)
         name = ElidedLabel(node.get("name", "?"), 11, "#d8dbde")
         top.addWidget(name, 1)
 
@@ -496,7 +494,11 @@ class MeshView(QWidget):
         combo = QComboBox()
         combo.setStyleSheet("font-size: 10px;")
         for tid in _TOKEN_ORDER:
-            combo.addItem(f"{_TOKEN_EMOJI[tid]} {tid}", tid)
+            idx = combo.count()
+            combo.addItem(f"{_TOKEN_GLYPH[tid]} {tid}", tid)
+            # Tint the token glyph+label to its state colour (the combo used to
+            # carry a colour-emoji dot; keep that colour cue with a plain glyph).
+            combo.setItemData(idx, QColor(_TOKEN_COLOR[tid]), Qt.ItemDataRole.ForegroundRole)
         idx = combo.findData(tokens)
         if idx >= 0:
             combo.setCurrentIndex(idx)
@@ -546,12 +548,12 @@ class MeshView(QWidget):
             "background-color: rgba(128,128,128,0.06); border-radius: 6px;"
         )
 
-        # Title row: emoji + title
+        # Title row: monochrome duty glyph (same as its grid action card) + title
         title_row = QHBoxLayout()
         title_row.setSpacing(6)
-        em = QLabel(duty["emoji"])
-        em.setStyleSheet("font-size: 12px;")
-        title_row.addWidget(em)
+        d_glyph = duty.get("linuxGlyph", duty["emoji"])
+        title_row.addWidget(GlyphLabel(d_glyph, 16, duty["colorHex"], font_px=13),
+                            0, Qt.AlignmentFlag.AlignVCenter)
         t = QLabel(duty["title"])
         t.setStyleSheet("font-size: 11px; font-weight: 600;")
         title_row.addWidget(t)
@@ -583,8 +585,8 @@ class MeshView(QWidget):
         if placement.spread:
             parts = []
             for plat, cnt in placement.spread:
-                pemoji, _ = _platform_meta(plat)
-                parts.append(f"{cnt}×{pemoji}")
+                pglyph, _ = _platform_meta(plat)
+                parts.append(f"{cnt}×{pglyph}")
             spread = QLabel("spread: " + "+".join(parts))
             spread.setStyleSheet(
                 "color: palette(mid); font-family: monospace; font-size: 9px;"

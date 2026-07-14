@@ -17,7 +17,7 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QCheckBox, QLabel, QVBoxLayout, QWidget
 
-from . import core
+from . import core, glyphs
 from .store import Store
 
 
@@ -26,7 +26,7 @@ def _duty_meta(duty_id: str) -> dict:
 
 
 class MeshSpawnRow(QWidget):
-    """`🕸 Run on mesh` toggle + a live "→ where it would land" caption."""
+    """`⬡ Run on mesh` toggle + a live "→ where it would land" caption."""
 
     # (results, error) marshalled back from the dispatch worker thread. Qt
     # queues cross-thread signal emissions, so slots run on the UI thread.
@@ -41,7 +41,7 @@ class MeshSpawnRow(QWidget):
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(2)
 
-        self.toggle = QCheckBox("🕸  Run on mesh")
+        self.toggle = QCheckBox(f"{glyphs.G_MESH}  Run on mesh")
         self.toggle.setChecked(True)
         self.toggle.setToolTip(
             "Route this spawn to the machine(s) the mesh strategy picks "
@@ -89,8 +89,8 @@ class MeshSpawnRow(QWidget):
 
         parts = [names.get(nid, nid[:8]) for nid in a.get("assigned", [])]
         for miss in a.get("shortfall", []):
-            emoji, _ = _platform_meta(miss.get("platform", ""))
-            parts.append(f"⚠ missing {miss.get('missing')}×{emoji}")
+            pglyph, _ = _platform_meta(miss.get("platform", ""))
+            parts.append(f"⚠ missing {miss.get('missing')}×{pglyph}")
         return " + ".join(parts) if parts else "∅ no eligible node"
 
     # MARK: - dispatch

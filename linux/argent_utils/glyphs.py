@@ -25,6 +25,8 @@ G_SEARCH = "⌕"   # reverse-lookup search
 G_DEVICES = "⧉"  # devices section
 G_ACTIVITY = "▤" # activity feed section
 G_BAN = "⊘"      # banned author (no-entry)
+G_MESH = "⬡"     # mesh column header / "run on mesh" toggle (matches the mesh
+                 # activity category's linuxGlyph)
 
 # --- Action-card glyphs (grid actions) -------------------------------------
 G_REVIEW = "☑"   # Review-PRs action
