@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import socket
 
-from . import protocol, statefile
+from . import config, protocol, statefile
 
 
 class CtlError(RuntimeError):
@@ -35,7 +35,7 @@ def request(msg: dict, timeout: float = 10.0) -> dict:
         with socket.create_connection((host, port), timeout=timeout) as sock:
             sock.settimeout(timeout)
             f = sock.makefile("rwb")
-            f.write(protocol.encode(protocol.ctl_hello()))
+            f.write(protocol.encode(protocol.ctl_hello(config.secret())))
             f.write(protocol.encode(msg))
             f.flush()
             line = f.readline(protocol.MAX_LINE_BYTES)

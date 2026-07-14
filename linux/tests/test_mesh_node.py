@@ -54,7 +54,7 @@ class Fleet:
         self.dirs: dict[str, Path] = {}
 
     def start(self, node_id: str, name: str, platform: str, tier: int,
-              tokens: str = "ok") -> None:
+              tokens: str = "ok", secret: str = "") -> None:
         d = self.root / node_id
         d.mkdir(parents=True, exist_ok=True)
         (d / "node.json").write_text(json.dumps({
@@ -67,6 +67,8 @@ class Fleet:
         env["ARGENT_MESH_DIR"] = str(d)
         env["ARGENT_MESH_PLATFORM"] = platform
         env["ARGENT_MESH_SPAWN"] = f"cp {{prompt_file}} {self.root}/spawned/{name}.txt"
+        env["ARGENT_MESH_SECRET"] = secret
+        (d / "secret").write_text(secret)  # remembered for this node's CLI calls
         # Each fake node logs to the fleet dir, and must not scribble on the
         # real ~/.argent activity feed.
         env["HOME"] = str(d)
@@ -84,12 +86,16 @@ class Fleet:
         except (OSError, json.JSONDecodeError):
             return {}
 
-    def cli(self, node_id: str, *args: str, timeout: float = 30.0
-            ) -> subprocess.CompletedProcess:
+    def cli(self, node_id: str, *args: str, timeout: float = 30.0,
+            secret: str | None = None) -> subprocess.CompletedProcess:
         env = dict(os.environ)
         env.update(_proto_env())
         env["ARGENT_MESH_DIR"] = str(self.dirs[node_id])
         env["HOME"] = str(self.dirs[node_id])
+        env["ARGENT_MESH_SECRET"] = (
+            secret if secret is not None
+            else (self.dirs[node_id] / "secret").read_text()
+        )
         return subprocess.run(
             [sys.executable, "-m", "argent_utils.mesh", *args],
             cwd=LINUX_DIR, env=env, capture_output=True, text=True, timeout=timeout,
@@ -218,6 +224,29 @@ def test_mesh_discovery_assignment_failover_and_dispatch(fleet):
     #    node dir, so the shared audit.jsonl lands inside the fixture).
     feed = (fleet.dirs["aaaa"] / ".argent" / "pr-monitor" / "audit.jsonl").read_text()
     assert "mesh-takeover" in feed and "mesh-peer-down" in feed
+
+
+def test_secret_fences_peers_and_control(fleet):
+    """With ARGENT_MESH_SECRET set, a wrong-secret node never links (it can
+    beacon all it wants) and a wrong-secret CLI can't drive the node."""
+    fleet.start("aaaa", "lin", "linux", tier=4, secret="hunter2")
+    fleet.start("bbbb", "mac", "macos", tier=1, secret="hunter2")
+    fleet.start("dddd", "intruder", "linux", tier=1, secret="wrong")
+    _wait_for(lambda: _links_up(fleet.state("aaaa"), 1), what="secret peers to link")
+
+    # Give the intruder ample beacon rounds, then confirm nobody linked it.
+    time.sleep(2.0)
+    assert not any(p.get("link") == "up" for p in fleet.state("aaaa").get("peers", [])
+                   if p.get("id") == "dddd")
+    assert not any(p.get("link") == "up" for p in fleet.state("dddd").get("peers", []))
+    # Grunt duties stay inside the fenced mesh, never on the intruder.
+    assert _assignments(fleet.state("aaaa"))["review"] == ("aaaa",)
+
+    # Control sessions honor the same fence.
+    r = fleet.cli("aaaa", "--status", secret="wrong")
+    assert "not answering" in (r.stdout + r.stderr)
+    r = fleet.cli("aaaa", "--set", "tokens=low", secret="hunter2")
+    assert r.returncode == 0
 
 
 def test_node_restart_is_a_new_incarnation(fleet):

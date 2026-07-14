@@ -80,6 +80,9 @@ class MeshNode:
         self._stopping = asyncio.Event()
         # In-flight remote dispatches awaiting a job-status answer, by job id.
         self._job_futures: dict[str, asyncio.Future] = {}
+        # Peers we're currently dialing — beacons repeat faster than a handshake
+        # completes, and the peers map only learns the link at hello time.
+        self._dialing: set[str] = set()
 
     # MARK: - identity / gossip source of truth
 
@@ -256,22 +259,30 @@ class MeshNode:
 
     async def _dial(self, peer_id: str, host: str, port: int) -> None:
         peer = self.peers.get(peer_id)
-        if peer is not None and peer.linked:
+        if (peer is not None and peer.linked) or peer_id in self._dialing:
             return
+        # Held for the whole life of a dial-originated link: while this
+        # coroutine runs (handshake AND pump), repeat beacons must not redial.
+        self._dialing.add(peer_id)
         try:
-            reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(host, port, limit=protocol.MAX_LINE_BYTES),
-                timeout=5.0,
-            )
-        except (OSError, asyncio.TimeoutError):
-            return  # next beacon retries
-        writer.write(protocol.encode(protocol.hello(self.info, self.overrides.to_dict())))
-        try:
-            await writer.drain()
-        except (ConnectionError, OSError):
-            writer.close()
-            return
-        await self._run_link(reader, writer, host)
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(host, port, limit=protocol.MAX_LINE_BYTES),
+                    timeout=5.0,
+                )
+            except (OSError, asyncio.TimeoutError):
+                return  # next beacon retries
+            writer.write(protocol.encode(
+                protocol.hello(self.info, self.overrides.to_dict(), config.secret())
+            ))
+            try:
+                await writer.drain()
+            except (ConnectionError, OSError):
+                writer.close()
+                return
+            await self._run_link(reader, writer, host)
+        finally:
+            self._dialing.discard(peer_id)
 
     # MARK: - TCP links + control sessions
 
@@ -287,12 +298,20 @@ class MeshNode:
         if not first:
             writer.close()
             return
+        # The join fence: with ARGENT_MESH_SECRET set, an opener (peer OR control
+        # client) that doesn't present the token gets silently dropped.
+        if first.get("t") in ("ctl", "hello") and \
+                str(first.get("secret", "")) != config.secret():
+            writer.close()
+            return
         if first.get("t") == "ctl":
             await self._run_ctl(reader, writer)
             return
         if first.get("t") == "hello":
             # Answer with our own hello, then treat like any link.
-            writer.write(protocol.encode(protocol.hello(self.info, self.overrides.to_dict())))
+            writer.write(protocol.encode(
+                protocol.hello(self.info, self.overrides.to_dict(), config.secret())
+            ))
             with contextlib.suppress(ConnectionError, OSError):
                 await writer.drain()
             self._on_message(first, host, writer)
@@ -333,6 +352,10 @@ class MeshNode:
     ) -> str | None:
         """Handle one link message; returns the peer id it bound to (if any)."""
         t = msg.get("t")
+        if t == "hello" and str(msg.get("secret", "")) != config.secret():
+            # A dialed "peer" that can't present the join token isn't one of
+            # ours — tear the link down (ValueError ends _run_link's pump).
+            raise ValueError("mesh secret mismatch")
         if t in ("hello", "node"):
             info = NodeInfo.from_dict(msg.get("node") or {})
             if info is None or info.id == self.local.id:

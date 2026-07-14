@@ -63,6 +63,19 @@ def loopback_only() -> bool:
     return os.environ.get("ARGENT_MESH_LOOPBACK") == "1"
 
 
+def secret() -> str:
+    """Optional pre-shared join token (ARGENT_MESH_SECRET, same value on every
+    machine + in the CLI/panel environment). A node with a secret refuses peer
+    links, control sessions, and therefore dispatches that don't present it.
+
+    This is a fence, not cryptography — the token rides plaintext on the LAN.
+    It keeps a stray machine (or a colleague's mesh on the same office network)
+    from joining yours and receiving jobs; it does not defend against a hostile
+    network. Empty (the default) = open mesh, fine for a home LAN.
+    """
+    return os.environ.get("ARGENT_MESH_SECRET", "")
+
+
 def duty_ids() -> list[str]:
     return [d["id"] for d in core.mesh()["duties"]]
 

@@ -167,12 +167,18 @@ def beacon(info: NodeInfo) -> dict:
     }
 
 
-def hello(info: NodeInfo, overrides_dict: dict) -> dict:
-    return {"t": "hello", "node": info.to_dict(), "overrides": overrides_dict}
+def hello(info: NodeInfo, overrides_dict: dict, secret: str = "") -> dict:
+    msg = {"t": "hello", "node": info.to_dict(), "overrides": overrides_dict}
+    if secret:
+        msg["secret"] = secret
+    return msg
 
 
-def ctl_hello() -> dict:
-    return {"t": "ctl"}
+def ctl_hello(secret: str = "") -> dict:
+    msg: dict = {"t": "ctl"}
+    if secret:
+        msg["secret"] = secret
+    return msg
 
 
 def heartbeat() -> dict:
