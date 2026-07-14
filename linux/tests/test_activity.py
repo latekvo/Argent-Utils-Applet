@@ -30,6 +30,14 @@ def test_category_of_matches_swift_taxonomy() -> None:
         "merge-failed": "merge",
         "ban": "bans",
         "unban": "bans",
+        # LAN-mesh coordination rows get their own chip
+        "mesh-up": "mesh",
+        "mesh-peer-up": "mesh",
+        "mesh-peer-down": "mesh",
+        "mesh-takeover": "mesh",
+        "mesh-dispatch": "mesh",
+        "mesh-dispatch-failed": "mesh",
+        "mesh-spawn": "mesh",
         # everything else falls through to system, so a row never vanishes
         "kill-device": "system",
         "repair-done": "system",
@@ -43,12 +51,12 @@ def test_category_of_matches_swift_taxonomy() -> None:
         assert activity.category_of(action) == expected, action
 
 
-def test_taxonomy_has_nine_categories_in_order() -> None:
+def test_taxonomy_has_ten_categories_in_order() -> None:
     cats = activity.categories()
     ids = [c.id for c in cats]
     assert ids == [
         "review", "reply", "conflicts", "audit", "apiRestart",
-        "quota", "merge", "bans", "system",
+        "quota", "merge", "bans", "mesh", "system",
     ]
     # every category the mapping can produce is a real declared category
     assert activity.category_of("ban") in ids
