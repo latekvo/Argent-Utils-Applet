@@ -1,0 +1,149 @@
+# 10 — Conformance
+
+This chapter defines what it means to *be a SzpontNet v1 node*: the mandatory
+behavior, the optional roles, and interop test vectors you can check an
+implementation against.
+
+## Roles
+
+A node fills one or more roles. Requirements scale with the roles claimed.
+
+- **Participant** (mandatory floor): discoverable, linkable, gossips its
+  advertisement, computes assignments. This is the minimum to *offer resources* to
+  the mesh.
+- **Executor** (to accept work): additionally handles inbound `dispatch` and runs
+  jobs.
+- **Dispatcher** (to originate work): additionally routes jobs with slot failover.
+- **Controllable** (to be driven by a UI/CLI): additionally serves a control
+  session.
+
+## Minimal node
+
+A **Participant** — the smallest conformant node — **MUST**:
+
+1. **Identity.** Have a stable, mesh-unique `id` that survives restart
+   ([08](08-state.md#nodejson)); take a higher `epoch` each process start.
+2. **Beacon.** Emit a valid [`beacon`](04-messages.md#beacon) to the multicast group
+   (and, off loopback, subnet broadcast) every `beaconIntervalSecs`, advertising its
+   real TCP port ([02](02-discovery.md)).
+3. **Receive beacons.** Join the multicast group, parse beacons, dedupe multicast vs
+   broadcast, ignore its own, and apply the [dial rule](02-discovery.md#the-dial-rule-smaller-id-dials)
+   (smaller id dials; exactly one link per pair; guard against double-dials).
+4. **Link.** Listen on TCP (first free port in the range), speak
+   [NDJSON framing](03-transport.md#framing) with the 512 KiB line cap, and complete
+   the [hello handshake](03-transport.md#link-lifecycle) in both directions.
+5. **Join fence.** If a secret is configured, enforce it on the opening
+   `hello`/`ctl` **and** enforce the [authentication-ordering rule](03-transport.md#the-join-fence)
+   (an unauthenticated dialed link accepts nothing but a valid hello first).
+6. **Advertise.** Put a well-formed [NodeInfo](04-messages.md#nodeinfo) in its hello
+   and keep it current.
+7. **Heartbeat & liveness.** Send [`heartbeat`](04-messages.md#heartbeat) every
+   `heartbeatIntervalSecs`; derive `up`/`stale`/`down` from `peerStaleSecs`/
+   `peerTimeoutSecs` using a **monotonic** clock; mark a peer `down` on timeout.
+8. **Gossip.** Merge incoming [`node`](04-messages.md#node) and
+   [`overrides`](04-messages.md#overrides) by freshness/LWW, re-propagate only
+   genuinely newer information, and never re-propagate stale info.
+9. **Assign.** Compute [`assign_all`](06-coordination.md#the-assignment-algorithm)
+   deterministically over the live set — identical output to any other conformant
+   node with the same inputs — and recompute on every relevant change.
+10. **Tolerate.** Ignore unknown fields, drop unknown message types, never crash on
+    malformed input ([09](09-extensibility.md#the-compatibility-contract)).
+
+An **Executor** additionally **MUST** handle inbound [`dispatch`](04-messages.md#dispatch)
+on authenticated links and reply with a truthful
+[`job-status`](04-messages.md#job-status) (`spawned`/`failed`).
+
+A **Dispatcher** additionally **MUST** route a job via
+[`slot_candidates`](07-dispatch.md#slots) with per-slot failover, one node per slot,
+honoring the `dispatchAckTimeoutSecs` wait for remote replies.
+
+A **Controllable** node additionally **MUST** accept a [`ctl`](04-messages.md#ctl)
+session (fenced by the secret) and handle `status`, `set-attr`, `set-overrides`,
+`dispatch`, and `stop`.
+
+## SHOULD / MAY
+
+- A node **SHOULD** emit a startup beacon immediately (don't wait a full interval).
+- A node **SHOULD** re-dial a peer that beacons a higher `epoch` (restart).
+- A node **SHOULD** retain a `down` peer in its snapshot for the retention window.
+- A node **SHOULD** warn (once) on a [cloned identity](08-state.md#cloned-identity).
+- A node **SHOULD** bound its peer table against a beacon flood (the reference caps
+  it and stops dialing new ids past the cap).
+- A node **MAY** persist a `state.json` snapshot and expose a control endpoint even
+  if it isn't otherwise Controllable (useful for local tooling).
+- A node **MAY** offer a loopback-only mode and timing overrides for testing.
+
+## Interop test vectors
+
+These are behaviors a second implementation can check against the reference. The
+reference asserts all of them in
+[`test_mesh_logic.py`](../../linux/tests/test_mesh_logic.py) (pure) and
+[`test_mesh_node.py`](../../linux/tests/test_mesh_node.py) (real sockets).
+
+### V1 — placement (pure, no sockets)
+
+Fleet `A`=linux/tier4/ok, `B`=macos/tier1/ok, `C`=macos/tier4/ok, all duties
+enabled, default policies:
+
+| Input | Expected `assigned` |
+|-------|---------------------|
+| `review` (weakest-first) | `[A]` |
+| `conflicts` | `[A]` |
+| `audit` (spread 1×linux+1×macos) | `[A, C]` |
+| `review`, override `strongest-first` | `[B]` |
+| `audit` with only `{B,C}` | `[C]`, shortfall `[{linux,1}]` |
+| `review`, `A` set `tokens:out` | `[C]` |
+| `review`, `A` set `tokens:low` (others ok) | `[C]` |
+| any duty, empty fleet | `[]`, unsatisfied |
+
+**Permutation invariance:** shuffling the input node order MUST NOT change any
+assignment.
+
+### V2 — codec round-trips
+
+- `encode`→`decode` of every message type yields an equal object (modulo the
+  defaulted `v`).
+- `decode` returns "drop" for: empty input; non-JSON; a JSON array (non-object); an
+  object with no string `t`; invalid UTF-8; a line longer than 512 KiB.
+- A NodeInfo with no `id` is invalid; one with a non-numeric `tier` is invalid; one
+  with only `id` fills all other fields with defaults.
+
+### V3 — freshness & LWW
+
+- For one `id`, `(epoch=200, seq=1)` supersedes `(epoch=100, seq=50)` (epoch wins
+  over seq); within an epoch, higher `seq` wins.
+- Overrides LWW: higher `rev` wins; equal `rev` breaks on `updatedBy`; the winner is
+  the same on every node.
+
+### V4 — live multi-node (real sockets)
+
+Booting three real nodes on loopback:
+
+- all three link to both peers (discovery converges);
+- all three publish **identical** assignments (deterministic agreement);
+- an `audit` dispatch spawns on exactly the two assigned machines;
+- setting the weak macOS node `tokens:out` moves the audit's macOS slot to the
+  strong macOS node, and a re-dispatch lands there (dispatch-time failover);
+- an override set on one node converges on all nodes;
+- killing a node moves its duties on every survivor and marks it `down`;
+- restarting a node re-links as a new incarnation.
+
+### V5 — the join fence
+
+- With a secret set, a wrong-secret node never links; a wrong-secret control client
+  can't drive the node.
+- **Critical:** a spoofed beacon that induces a dial, followed by a naked
+  `dispatch` (no hello, no secret), MUST NOT spawn anything — the
+  [authentication-ordering rule](03-transport.md#the-join-fence) rejects it. (The
+  reference test `test_outbound_dial_fence_rejects_naked_dispatch` drives exactly
+  this and fails if the gate is removed.)
+
+## Interop checklist (quick)
+
+- [ ] Two independent nodes discover each other and form one link.
+- [ ] They exchange hellos and each shows the other in its snapshot.
+- [ ] Both compute identical assignments for the shared duty set.
+- [ ] Killing one moves duties and marks it down on the other within
+      `peerTimeoutSecs`.
+- [ ] A dispatch routes to the assigned node and reports `spawned`.
+- [ ] With a secret set, a node without it cannot join or dispatch.

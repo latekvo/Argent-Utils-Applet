@@ -139,6 +139,11 @@ fix; off = a strictly read-only audit).
 
 ## Argent Mesh (experimental) — LAN P2P duty coordination
 
+> Argent Mesh is the reference implementation of **SzpontNet**, a small leaderless
+> LAN protocol for self-discovery, resource advertisement, and work hand-off. The
+> full, independently-implementable specification is in
+> [`docs/szpontnet/`](docs/szpontnet/README.md).
+
 With several machines on one desk (say a Linux box and two MacBooks), the
 wrench's grunt work shouldn't all land on the laptop you're typing on. **Argent
 Mesh** makes the machines coordinate: every node self-discovers its peers over
