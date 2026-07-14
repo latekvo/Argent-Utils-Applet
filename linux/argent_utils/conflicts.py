@@ -59,35 +59,13 @@ class ConflictConfig:
         return bool(self.author_handle)
 
     def build_prompt(self) -> str:
-        cfg = core.config()
-        owner, repo = cfg["owner"], cfg["repo"]
-        c = core.conflicts()
-        s = c["scope"]
-        blocks_src = c["blocks"]
-        blocks: list[str] = []
+        # Single-sourced in Swift (ArgentUtilsCore) via the argent-core CLI.
+        from . import promptcore
 
-        # Targeted replaces (not str.format) so literal braces in the shared
-        # templates can never crash the builder — mirrors the Swift side.
-        if self.is_single_pr:
-            blocks.append(
-                s["single"]
-                .replace("{pr}", self.pr_ref.number_string)
-                .replace("{owner}", owner)
-                .replace("{repo}", repo)
-            )
-        else:
-            tmpl = s["scopeMine"] if self.target == Target.MINE else s["scopeOther"]
-            scope = tmpl.replace("{handle}", self.author_handle)
-            blocks.append(
-                s["multi"]
-                .replace("{scope}", scope)
-                .replace("{owner}", owner)
-                .replace("{repo}", repo)
-            )
-
-        lead = "Merge" if self.is_single_pr else "For each, merge"
-        blocks.append(blocks_src["merge"].replace("{lead}", lead))
-        blocks.append(blocks_src["bar"])
-        blocks.append(blocks_src["summary"])
-        blocks.append(blocks_src["trailer"])
-        return "\n\n".join(blocks)
+        return promptcore.build_prompt({
+            "kind": "conflicts",
+            "target": self.target.name.lower(),
+            "username": self.username,
+            "me": self.me,
+            "specificPR": self.specific_pr,
+        })

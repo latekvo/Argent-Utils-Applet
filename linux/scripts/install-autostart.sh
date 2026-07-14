@@ -12,6 +12,15 @@ DESKTOP="${AUTOSTART_DIR}/argent-utils.desktop"
 chmod +x "$LAUNCHER"
 mkdir -p "$AUTOSTART_DIR"
 
+# Build the Swift prompt engine (argent-core) the applet shells out to for the
+# Review/Conflicts/Audit prompts. Soft-fail: the tray/UI still runs without it,
+# but those actions need the binary (build later with scripts/build-core.sh once a
+# Swift toolchain is installed).
+if ! "${LINUX_DIR}/scripts/build-core.sh"; then
+    echo "warning: argent-core not built (need a Swift toolchain) — Review/Conflicts/" >&2
+    echo "         Audit spawning is unavailable until scripts/build-core.sh succeeds." >&2
+fi
+
 cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Type=Application

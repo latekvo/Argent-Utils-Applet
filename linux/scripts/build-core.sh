@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Build the argent-core CLI (the Swift prompt engine the applet shells out to)
+# and install it to ~/.local/share/argent-utils/argent-core.
+#
+# argent-core is a statically-linked, self-contained binary (Swift stdlib + core
+# baked in): its only non-glibc deps are libstdc++/libgcc_s, so it runs on any
+# glibc Linux without a Swift toolchain present. Building it, however, needs a
+# Swift toolchain (https://swift.org/install — swiftly is the easy path).
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+DEST_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/argent-utils"
+DEST="$DEST_DIR/argent-core"
+
+# Pick up a swiftly-managed toolchain if swift isn't already on PATH.
+if ! command -v swift >/dev/null 2>&1; then
+    [ -f "$HOME/.local/share/swiftly/env.sh" ] && . "$HOME/.local/share/swiftly/env.sh"
+fi
+if ! command -v swift >/dev/null 2>&1; then
+    echo "error: no 'swift' toolchain found. Install one from https://swift.org/install" >&2
+    echo "       (e.g. swiftly), then re-run this script." >&2
+    exit 1
+fi
+
+echo "Building argent-core (static) with $(swift --version 2>/dev/null | head -1)…"
+cd "$REPO_ROOT"
+swift build --product argent-core --static-swift-stdlib -c release
+
+BIN="$(swift build --product argent-core -c release --show-bin-path)/argent-core"
+mkdir -p "$DEST_DIR"
+install -m 0755 "$BIN" "$DEST"
+echo "Installed: $DEST"
+"$DEST" build-prompt <<<'{"kind":"audit"}' >/dev/null && echo "Smoke check: OK"

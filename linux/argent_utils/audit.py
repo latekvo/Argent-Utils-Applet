@@ -38,25 +38,11 @@ class AuditConfig:
         return True
 
     def build_prompt(self) -> str:
-        owner, repo = self.target_repo
-        blocks_src = core.audit()["blocks"]
+        # Single-sourced in Swift (ArgentUtilsCore) via the argent-core CLI.
+        from . import promptcore
 
-        def fill(s: str) -> str:
-            # Targeted replaces (not str.format) so literal braces in the shared
-            # templates can never crash the builder — mirrors the Swift side.
-            return s.replace("{owner}", owner).replace("{repo}", repo)
-
-        blocks: list[str] = [fill(blocks_src["intro"]), fill(blocks_src["bar"])]
-        # Always: classify every finding H/M/L (drives the report + the Low<20-LOC PR gate).
-        blocks.append(fill(blocks_src["classify"]))
-        # Optional: also reproduce + fix the repo's open BUG issues.
-        if self.fix_issues:
-            blocks.append(fill(blocks_src["issues"]))
-        # Delivery: open a PR per fix, or stay read-only and just report.
-        if self.open_prs:
-            blocks.append(fill(blocks_src["openPRs"]))
-            blocks.append(fill(blocks_src["noAttribution"]))
-        else:
-            blocks.append(fill(blocks_src["readOnly"]))
-        blocks.append(fill(blocks_src["summary"]))
-        return "\n\n".join(blocks)
+        return promptcore.build_prompt({
+            "kind": "audit",
+            "fixIssues": self.fix_issues,
+            "openPRs": self.open_prs,
+        })

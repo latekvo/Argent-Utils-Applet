@@ -108,34 +108,10 @@ class ReviewConfig:
     def can_final_pass(self) -> bool:
         return self.target != PRTarget.MINE
 
-    @property
-    def eff_mark_ready(self) -> bool:
-        return self.mark_ready and self.can_mark_ready
-
-    @property
-    def eff_leave_reviews(self) -> bool:
-        return self.leave_reviews and self.can_leave_reviews
-
-    @property
-    def eff_reply_to_reviews(self) -> bool:
-        return self.reply_to_reviews and self.can_reply_to_reviews
-
-    @property
-    def eff_final_pass(self) -> bool:
-        return self.final_pass and self.can_final_pass
-
     # Review exactly one PR by number/URL instead of a whose-PRs sweep.
     @property
     def is_single_pr(self) -> bool:
         return self.target == PRTarget.SPECIFIC
-
-    # Reviewing someone else's PRs: a hard look-don't-touch mode. We never commit
-    # or push to their branch, so the no-commit guard goes in and the
-    # commit-authoring guidance stays out. (A specific PR may be mine, so it is
-    # deliberately NOT review-only.)
-    @property
-    def is_review_only(self) -> bool:
-        return self.target == PRTarget.SOMEONE
 
     @property
     def target_repo(self) -> tuple[str, str]:
@@ -157,124 +133,25 @@ class ReviewConfig:
         # A whose-PRs sweep needs a handle and at least one PR-state box ticked.
         return bool(self.author_handle) and (self.include_drafts or self.include_ready)
 
-    @property
-    def _pr_kind(self) -> str:
-        s = core.review()["scope"]
-        if self.include_drafts and self.include_ready:
-            return s["prKindBoth"]
-        if self.include_drafts and not self.include_ready:
-            return s["prKindDrafts"]
-        return s["prKindReady"]
-
     def build_prompt(self) -> str:
-        cfg = core.config()
-        owner, repo = cfg["owner"], cfg["repo"]
-        s = core.review()["scope"]
-        blocks_src = core.review()["blocks"]
+        # Single-sourced in Swift (ArgentUtilsCore) — assembled by the argent-core
+        # CLI so the Linux applet can't drift from the macOS builder.
+        from . import promptcore
 
-        # A specific PR may be mine OR someone else's — which decides whether the
-        # agent is allowed to touch the branch. We can't know the author up front,
-        # so we hand the agent an author-gated prompt instead of guessing.
-        if self.is_single_pr:
-            return self._build_specific_prompt(owner, repo)
-
-        blocks: list[str] = []
-        tmpl = s["scopeMine"] if self.target == PRTarget.MINE else s["scopeOther"]
-        # Targeted replaces (not str.format) so literal braces in the shared
-        # templates can never crash the builder — mirrors the Swift side.
-        scope = tmpl.replace("{prKind}", self._pr_kind).replace(
-            "{handle}", self.author_handle
-        )
-        blocks.append(
-            s["multi"]
-            .replace("{scope}", scope)
-            .replace("{owner}", owner)
-            .replace("{repo}", repo)
-        )
-
-        # For someone else's PRs, frame the whole task as look-don't-touch up front.
-        if self.is_review_only:
-            blocks.append(blocks_src["reviewOnly"])
-
-        depth = depth_by_id(self.depth)
-        blocks.append(depth["fragment"])
-        # The depth's on-branch fix step only when we may actually commit — never
-        # for someone else's branch, which we don't touch.
-        on_branch = depth.get("onBranch")
-        if on_branch and not self.is_review_only:
-            blocks.append(on_branch)
-        blocks.append(blocks_src["bar"])
-
-        if self.eff_mark_ready:
-            blocks.append(blocks_src["markReady"])
-        if self.eff_leave_reviews:
-            blocks.append(blocks_src["leaveReviews"])
-        if self.eff_reply_to_reviews:
-            blocks.append(blocks_src["reply"])
-
-        blocks.append(blocks_src["trailer"])
-        # Commit-authoring guidance only when we might actually commit — never
-        # for someone else's branch, which we don't touch.
-        if not self.is_review_only:
-            blocks.append(blocks_src["noAttribution"])
-        if self.eff_final_pass:
-            blocks.append(blocks_src["finalPass"])
-        return "\n\n".join(blocks)
-
-    def _build_specific_prompt(self, owner: str, repo: str) -> str:
-        """The single-PR (Specific PR) prompt. Because the PR may be mine or someone
-        else's — and that decides whether the branch may be touched — this tells the
-        agent to poll the author first, then split into two mutually exclusive cases:
-        CASE A (mine -> fix on the branch, mark clean ready, reply, no AI attribution)
-        and CASE B (theirs -> review only, never touch the branch, leave a formal
-        review, and explicitly DO NOT mark it ready). The action sub-blocks are gated
-        by the same toggles the wizard exposes. Matches Review.swift's
-        ``buildSpecificPrompt`` — the author-unknown tier only; Swift's known-mine /
-        known-theirs single-PR prompts serve macOS-only monitors and have no Linux
-        counterpart.
-        """
-        s = core.review()["scope"]
-        blocks_src = core.review()["blocks"]
-        specific = core.review()["specific"]
-        depth = depth_by_id(self.depth)
-        handle = self.me or "me"
-
-        def fill(text: str) -> str:
-            return (
-                text.replace("{pr}", self.pr_ref.number_string)
-                .replace("{owner}", owner)
-                .replace("{repo}", repo)
-                .replace("{me}", handle)
-            )
-
-        blocks: list[str] = [fill(s["single"]), fill(specific["determineAuthor"])]
-        # The review work itself is the same regardless of author; only the
-        # disposition differs, so the approach + bar come before the split.
-        blocks.append(depth["fragment"])
-        blocks.append(blocks_src["bar"])
-
-        # CASE A — it's mine: fix it on the branch.
-        blocks.append(fill(specific["mineHeader"]))
-        on_branch = depth.get("onBranch")
-        if on_branch:
-            blocks.append(on_branch)
-        if self.eff_mark_ready:
-            blocks.append(blocks_src["markReady"])
-        if self.eff_reply_to_reviews:
-            blocks.append(blocks_src["reply"])
-        blocks.append(blocks_src["noAttribution"])
-
-        # CASE B — it's someone else's: review only, hands off the branch.
-        blocks.append(fill(specific["otherHeader"]))
-        blocks.append(blocks_src["reviewOnly"])
-        if self.eff_leave_reviews:
-            blocks.append(blocks_src["leaveReviews"])
-        blocks.append(fill(specific["otherNoMarkReady"]))
-
-        blocks.append(blocks_src["trailer"])
-        if self.eff_final_pass:
-            blocks.append(blocks_src["finalPass"])
-        return "\n\n".join(b for b in blocks if b)
+        return promptcore.build_prompt({
+            "kind": "review",
+            "depth": self.depth,
+            "target": self.target.name.lower(),
+            "username": self.username,
+            "me": self.me,
+            "markReady": self.mark_ready,
+            "leaveReviews": self.leave_reviews,
+            "replyToReviews": self.reply_to_reviews,
+            "includeDrafts": self.include_drafts,
+            "includeReady": self.include_ready,
+            "specificPR": self.specific_pr,
+            "finalPass": self.final_pass,
+        })
 
 
 # MARK: - Terminal choice + spawning

@@ -149,7 +149,8 @@ def test_final_pass_never_applies_to_my_own_prs():
     # my own work, so target=MINE drops the block even with the toggle on
     # (Swift: canFinalPass = disposition != .mine).
     mine = review.ReviewConfig(me="latekvo", final_pass=True)
-    assert not mine.can_final_pass and not mine.eff_final_pass
+    assert not mine.can_final_pass
+    # The gating now lives in Swift (argent-core); assert the observable behavior.
     assert "FULL E2E pass" not in mine.build_prompt()
 
     # Someone else's PRs and a specific PR (author unknown) keep the escalation.
