@@ -74,6 +74,33 @@ def _device_fixture(store: Store) -> None:
     }
 
 
+def _telemetry_fixture(store: Store) -> None:
+    """Synthetic activity feed + ban list so the left telemetry pane can be eyeballed."""
+    from datetime import datetime, timedelta, timezone
+
+    from . import activity, bans
+
+    now = datetime.now(timezone.utc)
+
+    def iso(mins: float) -> str:
+        return (now - timedelta(minutes=mins)).isoformat()
+
+    store.audit_entries = [
+        activity.AuditEntry(iso(1), "panel", "review", "Review · #389 · deep"),
+        activity.AuditEntry(iso(4), "auto", "review-req", "Picked up review request on #402"),
+        activity.AuditEntry(iso(9), "agent", "merge", "Merged #377 (2 approvals)"),
+        activity.AuditEntry(iso(15), "auto", "nudge", "Nudged stalled agent on #389 (API error)"),
+        activity.AuditEntry(iso(22), "panel", "conflicts", "Resolve conflicts · #360"),
+        activity.AuditEntry(iso(31), "agent", "audit", "Full E2E audit dispatched"),
+        activity.AuditEntry(iso(48), "auto", "ban", "Banned @sketchy-bot (prompt injection)"),
+        activity.AuditEntry(iso(90), "auto", "kill-device", "Killed idle emulator-5554"),
+    ]
+    store.banned_authors = [
+        bans.BannedAuthor("sketchy-bot", "prompt injection in PR body", "#391"),
+        bans.BannedAuthor("evil-actor", "hidden instructions in the diff", None),
+    ]
+
+
 def run(what: str, out: str) -> int:
     app = QApplication.instance() or QApplication([])
     store = Store()
@@ -97,7 +124,11 @@ def run(what: str, out: str) -> int:
         panel._rebuild_devices()
         panel._update_results()
     else:  # panel
+        _device_fixture(store)
+        _telemetry_fixture(store)
         panel._rebuild_grid()
+        panel._rebuild_devices()
+        panel._rebuild_telemetry()
         panel._update_results()
 
     panel.show()

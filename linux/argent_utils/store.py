@@ -84,6 +84,8 @@ class Store(QObject):
     # data refresh) and when its install status is re-checked.
     devices_changed = Signal()
     allocator_changed = Signal()
+    # Emitted when the activity feed (audit.jsonl) or ban list snapshot changes.
+    activity_changed = Signal()
 
     _ORG = "argent-utils"
     _APP = "argent-utils"
@@ -102,6 +104,10 @@ class Store(QObject):
         # Live device-allocator state (pool + holders) and install status.
         self.device_state: dict | None = None
         self.allocator_install: dict | None = None
+
+        # Live telemetry read from the shared ~/.argent files (activity feed + bans).
+        self.audit_entries: list = []
+        self.banned_authors: list = []
 
         # Honor the process-wide default format (NativeFormat unless overridden):
         # the two-arg QSettings(org, app) constructor is hardwired to NativeFormat,
@@ -263,6 +269,20 @@ class Store(QObject):
             self.allocator_install = deviceallocator.check()
             self.allocator_changed.emit()
         threading.Thread(target=work, daemon=True).start()
+
+    # MARK: activity feed + bans
+
+    def refresh_activity(self) -> None:
+        """Re-read the shared activity feed (audit.jsonl) and ban list (cheap tail /
+        small-file reads) and signal on change. Runs on the panel's 8s poll."""
+        from . import activity, bans
+
+        new_audit = activity.read()
+        new_bans = bans.read()
+        if new_audit != self.audit_entries or new_bans != self.banned_authors:
+            self.audit_entries = new_audit
+            self.banned_authors = new_bans
+            self.activity_changed.emit()
 
     def ensure_allocator_installed_async(self) -> None:
         """One-time automatic install of the device-allocator MCP when Argent

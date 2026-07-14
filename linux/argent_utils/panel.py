@@ -26,13 +26,16 @@ from PySide6.QtCore import QUrl
 
 import time
 
-from . import core
+from . import activity, bans, core
 from .models import Fmt
 from .settingsview import SettingsView
 from .store import Store, tool_by_id
 from .widgets import (
     ActionCard,
+    ActivityRow,
+    BanRow,
     ResultRow,
+    SectionHeader,
     ToolCard,
     hline,
     tint_bg,
@@ -112,18 +115,20 @@ class Panel(QWidget):
         # instance so a poll-driven rebuild doesn't reset the user's collapse choice.
         self._inuse_expanded = True
         self._free_expanded = False
+        # Left-pane telemetry sections (both expanded by default).
+        self._activity_expanded = True
+        self._bans_expanded = True
 
         self.setWindowFlags(
             Qt.WindowType.Tool
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
         )
-        # Widened from 470 to give the Devices section room for a name, holder,
-        # and status badge on one line. Height tracks the screen (matching the
-        # macOS popover, which grows to content capped at the screen's safe area):
-        # availableGeometry already excludes the taskbar/panel, so the wrench panel
-        # runs nearly full-height and the results list gets the room.
-        self.setFixedWidth(560)
+        # Two-pane layout (matching the macOS popover): a left telemetry column
+        # (devices · activity · bans) beside the right interactive column (search ·
+        # tool grid · results). Widened to give both panes room; height tracks the
+        # screen's safe area (availableGeometry excludes the taskbar/panel).
+        self.setFixedWidth(1080)
         self.setFixedHeight(self._screen_high())
 
         outer = QVBoxLayout(self)
@@ -152,12 +157,16 @@ class Panel(QWidget):
         store.changed.connect(self._on_data_changed)
         store.loading_changed.connect(self._on_loading)
         store.devices_changed.connect(self._rebuild_devices)
+        store.activity_changed.connect(self._rebuild_telemetry)
 
-        # Poll the device-allocator's state file on a light cadence (cheap file read).
+        # Poll the device-allocator state file + the shared activity/ban files on a
+        # light cadence (cheap file reads).
         self._device_timer = QTimer(self)
         self._device_timer.timeout.connect(self.store.refresh_device_state)
+        self._device_timer.timeout.connect(self.store.refresh_activity)
         self._device_timer.start(8000)
         self.store.refresh_device_state()
+        self.store.refresh_activity()
 
         # Advance the "held" durations on in-use devices even when the pool itself
         # hasn't changed (allocatedAt is fixed; the elapsed time is not).
@@ -167,6 +176,7 @@ class Panel(QWidget):
 
         self._rebuild_grid()
         self._rebuild_devices()
+        self._rebuild_telemetry()
         self._update_results()
 
     @staticmethod
@@ -220,9 +230,20 @@ class Panel(QWidget):
     # MARK: main page
 
     def _build_main_page(self) -> None:
-        layout = QVBoxLayout(self.main_page)
+        layout = QHBoxLayout(self.main_page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(12)
+        layout.addWidget(self._build_left_pane(), 1)
+        layout.addWidget(self._build_right_pane(), 1)
+
+    def _build_left_pane(self) -> QWidget:
+        """Telemetry column: device-allocator pool, activity feed, ban list. Each
+        section is rebuilt in place from the shared ~/.argent files and hidden when
+        empty. Wrapped in a scroll area so a busy feed scrolls within the pane."""
+        host = QWidget()
+        col = QVBoxLayout(host)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(8)
 
         # Device-allocator pool (the shared simulators/emulators + who holds what).
         # Rebuilt in place from the daemon's state file; hidden when the pool is empty.
@@ -234,7 +255,46 @@ class Panel(QWidget):
             "background-color: rgba(128,128,128,0.07); border-radius: 8px;"
         )
         self.devices_host.setVisible(False)
-        layout.addWidget(self.devices_host)
+        col.addWidget(self.devices_host)
+
+        # Activity feed — the shared audit.jsonl action log (panel + daemon + agents).
+        self.activity_host = QWidget()
+        self.activity_col = QVBoxLayout(self.activity_host)
+        self.activity_col.setContentsMargins(7, 7, 7, 7)
+        self.activity_col.setSpacing(4)
+        self.activity_host.setStyleSheet(
+            "background-color: rgba(128,128,128,0.07); border-radius: 8px;"
+        )
+        self.activity_host.setVisible(False)
+        col.addWidget(self.activity_host)
+
+        # Banned authors (prompt-injection blocklist; read-only here).
+        self.bans_host = QWidget()
+        self.bans_col = QVBoxLayout(self.bans_host)
+        self.bans_col.setContentsMargins(7, 7, 7, 7)
+        self.bans_col.setSpacing(4)
+        self.bans_host.setStyleSheet(
+            "background-color: rgba(255,59,48,0.06); border-radius: 8px;"
+        )
+        self.bans_host.setVisible(False)
+        col.addWidget(self.bans_host)
+
+        col.addStretch(1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(host)
+        return scroll
+
+    def _build_right_pane(self) -> QWidget:
+        """Interactive column: reverse-lookup search, tool grid, and the
+        results/wizard stack — the panel's original single-column content."""
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
         # Search (reverse lookup)
         search_box = QWidget()
@@ -317,6 +377,8 @@ class Panel(QWidget):
         audit_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         audit_scroll.setWidget(self.audit_wizard)
         self.results.addWidget(audit_scroll)  # index 5
+
+        return host
 
     # MARK: grid
 
@@ -420,6 +482,60 @@ class Panel(QWidget):
     def _toggle_free(self) -> None:
         self._free_expanded = not self._free_expanded
         self._rebuild_devices()
+
+    # MARK: activity feed + bans
+
+    def _rebuild_telemetry(self) -> None:
+        self._rebuild_activity()
+        self._rebuild_bans()
+
+    def _rebuild_activity(self) -> None:
+        _clear_layout(self.activity_col)
+        entries = self.store.audit_entries
+        if not entries:
+            self.activity_host.setVisible(False)
+            return
+        self.activity_host.setVisible(True)
+
+        header = SectionHeader(glyph="📜", title="Activity", count=len(entries),
+                               expanded=self._activity_expanded)
+        header.clicked.connect(self._toggle_activity)
+        self.activity_col.addWidget(header)
+        if self._activity_expanded:
+            # Cap at 30 rows (matching macOS) — the feed grows forever.
+            for e in entries[:30]:
+                self.activity_col.addWidget(ActivityRow(
+                    glyph=activity.glyph_for(e.action),
+                    detail=e.detail,
+                    source=e.source,
+                    source_color=activity.source_color(e.source),
+                    clock=Fmt.clock(e.date),
+                ))
+
+    def _toggle_activity(self) -> None:
+        self._activity_expanded = not self._activity_expanded
+        self._rebuild_activity()
+
+    def _rebuild_bans(self) -> None:
+        _clear_layout(self.bans_col)
+        banned = self.store.banned_authors
+        if not banned:
+            self.bans_host.setVisible(False)
+            return
+        self.bans_host.setVisible(True)
+
+        header = SectionHeader(glyph="🚫", title="Banned", count=len(banned),
+                               caption="prompt injection · no auto-reviews",
+                               expanded=self._bans_expanded)
+        header.clicked.connect(self._toggle_bans)
+        self.bans_col.addWidget(header)
+        if self._bans_expanded:
+            for b in banned:
+                self.bans_col.addWidget(BanRow(login=b.login, reason=b.reason))
+
+    def _toggle_bans(self) -> None:
+        self._bans_expanded = not self._bans_expanded
+        self._rebuild_bans()
 
     def _device_section(self, title: str, color: str, expanded: bool,
                         devices: list[dict], toggle_slot) -> None:

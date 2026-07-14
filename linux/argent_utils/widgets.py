@@ -196,6 +196,107 @@ class ResultRow(ClickableFrame):
         row.addWidget(arrow)
 
 
+class SectionHeader(ClickableFrame):
+    """A collapsible left-pane section header: glyph + TITLE + count + caption + chevron.
+
+    Emits ``clicked`` (via ClickableFrame) so the panel can toggle the section body;
+    call :meth:`set_expanded` to flip the chevron.
+    """
+
+    def __init__(self, *, glyph: str, title: str, count: int | None = None,
+                 caption: str | None = None, expanded: bool = True) -> None:
+        super().__init__()
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(2, 0, 2, 0)
+        row.setSpacing(6)
+        g = QLabel(glyph)
+        g.setStyleSheet("font-size: 11px;")
+        row.addWidget(g)
+        t = QLabel(title.upper())
+        t.setStyleSheet(
+            "color: palette(mid); font-weight: 700; font-size: 10px;"
+        )
+        row.addWidget(t)
+        if count is not None:
+            c = QLabel(str(count))
+            c.setStyleSheet("color: palette(mid); font-family: monospace; font-size: 10px;")
+            row.addWidget(c)
+        if caption:
+            cap = QLabel(caption)
+            cap.setStyleSheet("color: palette(mid); font-size: 9px;")
+            row.addWidget(cap)
+        row.addStretch(1)
+        self._chev = QLabel("▾" if expanded else "▸")
+        self._chev.setStyleSheet("color: palette(mid); font-size: 10px;")
+        row.addWidget(self._chev)
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._chev.setText("▾" if expanded else "▸")
+
+
+class ActivityRow(QFrame):
+    """One line in the activity feed: action glyph + detail + source badge + time."""
+
+    def __init__(self, *, glyph: str, detail: str, source: str,
+                 source_color: str, clock: str | None) -> None:
+        super().__init__()
+        self.setStyleSheet(
+            "ActivityRow { background-color: rgba(128,128,128,0.05); border-radius: 6px; }"
+        )
+        row = QHBoxLayout(self)
+        row.setContentsMargins(6, 6, 6, 6)
+        row.setSpacing(8)
+        g = QLabel(glyph)
+        g.setFixedWidth(18)
+        g.setStyleSheet("font-size: 12px;")
+        g.setAlignment(Qt.AlignmentFlag.AlignTop)
+        row.addWidget(g)
+        d = QLabel(detail)
+        d.setWordWrap(True)
+        d.setStyleSheet("font-size: 10px;")
+        row.addWidget(d, 1)
+        if source:
+            badge = QLabel(source)
+            badge.setStyleSheet(
+                f"color: {source_color}; background-color: {tint_bg(source_color, 0.15)};"
+                " border-radius: 5px; padding: 1px 5px; font-size: 8px; font-weight: 700;"
+            )
+            row.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
+        if clock:
+            ts = QLabel(clock)
+            ts.setStyleSheet("color: palette(mid); font-family: monospace; font-size: 9px;")
+            row.addWidget(ts, 0, Qt.AlignmentFlag.AlignTop)
+
+
+class BanRow(QFrame):
+    """One banned author: raised-hand glyph + @login + reason."""
+
+    def __init__(self, *, login: str, reason: str | None) -> None:
+        super().__init__()
+        self.setStyleSheet(
+            "BanRow { background-color: rgba(128,128,128,0.06); border-radius: 6px; }"
+        )
+        row = QHBoxLayout(self)
+        row.setContentsMargins(6, 6, 6, 6)
+        row.setSpacing(8)
+        g = QLabel("🚫")
+        g.setFixedWidth(18)
+        g.setStyleSheet("font-size: 12px;")
+        row.addWidget(g, 0, Qt.AlignmentFlag.AlignTop)
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        t = QLabel(f"@{login}")
+        t.setStyleSheet("font-size: 10px; font-weight: 600;")
+        col.addWidget(t)
+        if reason:
+            r = QLabel(reason)
+            r.setWordWrap(True)
+            r.setStyleSheet("color: palette(mid); font-size: 9px;")
+            col.addWidget(r)
+        row.addLayout(col, 1)
+
+
 def hline() -> QFrame:
     line = QFrame()
     line.setFrameShape(QFrame.Shape.HLine)
