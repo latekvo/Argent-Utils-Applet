@@ -24,6 +24,34 @@ def audit_path() -> Path:
     return _dir() / "audit.jsonl"
 
 
+def log(source: str, action: str, detail: str) -> None:
+    """Append one entry to the shared audit.jsonl — the Linux analogue of
+    AuditLog.log. Best-effort and atomic (O_APPEND, so a concurrent daemon append
+    can't be clobbered); never raises into the caller. This is what gives the Linux
+    activity feed a data source: the panel logs here whenever it dispatches an
+    action, the same way the macOS app and the device-allocator daemon do."""
+    import json
+    import os
+    from datetime import datetime, timezone
+
+    entry = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "source": source,
+        "action": action,
+        "detail": detail,
+    }
+    line = (json.dumps(entry) + "\n").encode("utf-8")
+    try:
+        _dir().mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(audit_path()), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        try:
+            os.write(fd, line)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
 # MARK: - Category taxonomy (from core/audit-categories.json)
 
 

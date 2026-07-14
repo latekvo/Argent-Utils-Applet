@@ -279,6 +279,20 @@ class Panel(QWidget):
         self.bans_host.setVisible(False)
         col.addWidget(self.bans_host)
 
+        # Shown only while all three sections are empty, so the pane reads as
+        # "nothing yet" rather than looking broken (the feed fills as you dispatch
+        # actions; devices/bans appear when the daemon reports them).
+        self.telemetry_empty = QLabel(
+            "No devices, activity, or bans yet.\n"
+            "Dispatch a review, conflict, or audit and it shows up here."
+        )
+        self.telemetry_empty.setWordWrap(True)
+        self.telemetry_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.telemetry_empty.setStyleSheet(
+            "color: palette(mid); font-size: 11px; padding: 24px 8px;"
+        )
+        col.addWidget(self.telemetry_empty)
+
         col.addStretch(1)
 
         scroll = QScrollArea()
@@ -449,6 +463,7 @@ class Panel(QWidget):
         devices = (state or {}).get("devices", [])
         if not devices:
             self.devices_host.setVisible(False)
+            self._update_telemetry_placeholder()
             return
         self.devices_host.setVisible(True)
 
@@ -474,6 +489,16 @@ class Panel(QWidget):
         if free:
             self._device_section("Free", "gray", self._free_expanded,
                                  free, self._toggle_free)
+        self._update_telemetry_placeholder()
+
+    def _update_telemetry_placeholder(self) -> None:
+        """Show the left-pane placeholder only when every telemetry section is empty."""
+        any_visible = (
+            not self.devices_host.isHidden()
+            or not self.activity_host.isHidden()
+            or not self.bans_host.isHidden()
+        )
+        self.telemetry_empty.setVisible(not any_visible)
 
     def _toggle_inuse(self) -> None:
         self._inuse_expanded = not self._inuse_expanded
@@ -488,6 +513,7 @@ class Panel(QWidget):
     def _rebuild_telemetry(self) -> None:
         self._rebuild_activity()
         self._rebuild_bans()
+        self._update_telemetry_placeholder()
 
     def _rebuild_activity(self) -> None:
         _clear_layout(self.activity_col)

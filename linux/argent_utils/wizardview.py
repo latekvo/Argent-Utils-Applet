@@ -212,10 +212,15 @@ class WizardView(QWidget):
         self._sync()
 
     def _spawn(self) -> None:
+        from . import activity
+
         cfg = self._config()
         term = review.resolved(self.store.terminal)
         try:
             review.spawn(cfg.build_prompt(), self.store.terminal)
             self.status.setText(f"Launched {term.title}")
+            scope = cfg.specific_pr.strip() or "PRs"
+            activity.log("panel", "review", f"Review · {scope} · {cfg.depth}")
+            self.store.refresh_activity()
         except Exception as exc:  # noqa: BLE001
             self.status.setText(f"Failed: {exc}")

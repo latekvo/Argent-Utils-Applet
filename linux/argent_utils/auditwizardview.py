@@ -110,10 +110,17 @@ class AuditWizardView(QWidget):
         validate, but the panel calls this on every data refresh)."""
 
     def _spawn(self) -> None:
+        from . import activity
+
         cfg = self._config()
         term = review.resolved(self.store.terminal)
         try:
             review.spawn(cfg.build_prompt(), self.store.terminal)
             self.status.setText(f"Launched {term.title}")
+            extra = " · ".join(
+                x for x in (["issues"] if cfg.fix_issues else []) + (["open PRs"] if cfg.open_prs else []) if x
+            )
+            activity.log("panel", "audit", f"Full E2E audit{(' · ' + extra) if extra else ''}")
+            self.store.refresh_activity()
         except Exception as exc:  # noqa: BLE001
             self.status.setText(f"Failed: {exc}")

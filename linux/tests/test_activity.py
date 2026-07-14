@@ -76,3 +76,16 @@ def test_read_parses_newest_first(tmp_path, monkeypatch) -> None:
     entries = activity.read()
     assert [e.detail for e in entries] == ["b", "a"]  # newest first
     assert entries[0].date is not None  # fractional/Z timestamps parse
+
+
+def test_log_appends_and_reads_back(tmp_path, monkeypatch):
+    # The writer is what gives the Linux feed a data source (the panel logs here
+    # whenever it dispatches an action).
+    monkeypatch.setattr(activity, "_dir", lambda: tmp_path)
+    activity.log("panel", "review", "Review · #337 · deep")
+    activity.log("panel", "audit", "Full E2E audit")
+    entries = activity.read()
+    assert [(e.source, e.action, e.detail) for e in entries] == [
+        ("panel", "audit", "Full E2E audit"),           # newest first
+        ("panel", "review", "Review · #337 · deep"),
+    ]
