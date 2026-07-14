@@ -25,5 +25,13 @@ let package = Package(
             dependencies: ["ArgentUtilsCore"],
             path: "Sources/ArgentUtilsCoreSmoke"
         ),
+        // Thin CLI over the core so the Linux (Qt6) front-end can shell out for
+        // prompt assembly instead of re-implementing it — a single source of truth
+        // for the Review/Conflicts/Audit prompts. Foundation-only; builds on Linux.
+        .executableTarget(
+            name: "argent-core",
+            dependencies: ["ArgentUtilsCore"],
+            path: "Sources/argent-core"
+        ),
     ]
 )
