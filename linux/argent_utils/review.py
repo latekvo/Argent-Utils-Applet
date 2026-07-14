@@ -348,14 +348,23 @@ def write_prompt(prompt: str) -> str:
     return path
 
 
-def shell_command(prompt_file: str) -> str:
-    """``cd '<repo>' 2>/dev/null; claude "$(cat '<file>')"; exec bash``
+def user_shell() -> str:
+    """The user's interactive login shell — so the spawned command sees the aliases
+    and env exported from their rc (e.g. a `claude` alias in ~/.zshrc). Override with
+    ARGENT_UTILS_SHELL; falls back to $SHELL, then bash."""
+    return os.environ.get("ARGENT_UTILS_SHELL") or os.environ.get("SHELL") or "/bin/bash"
 
-    The trailing ``exec bash`` keeps the window open after the session ends.
+
+def shell_command(prompt_file: str) -> str:
+    """``cd '<repo>' 2>/dev/null; claude "$(cat '<file>')"; exec "$SHELL" -i``
+
+    Run (via :func:`user_shell`, interactively) so the user's rc is sourced and
+    `claude` resolves to their alias. The trailing ``exec`` keeps the window open in
+    the user's shell after the session ends.
     """
     repo = shlex.quote(repo_path())
     pf = shlex.quote(prompt_file)
-    return f'cd {repo} 2>/dev/null; claude "$(cat {pf})"; exec bash'
+    return f'cd {repo} 2>/dev/null; claude "$(cat {pf})"; exec "$SHELL" -i'
 
 
 def spawn(prompt: str, preferred: SpawnTerminal | None) -> str:
@@ -364,7 +373,9 @@ def spawn(prompt: str, preferred: SpawnTerminal | None) -> str:
     term = resolved(preferred)
     file = write_prompt(prompt)
     cmd = shell_command(file)
-    argv = [term.exec_name, *term.prefix, "bash", "-c", cmd]
+    # Run under the user's INTERACTIVE shell (-i) so their rc is sourced and the
+    # `claude` alias + exported env are present — a plain `bash -c` gets neither.
+    argv = [term.exec_name, *term.prefix, user_shell(), "-i", "-c", cmd]
     try:
         subprocess.Popen(  # noqa: S603 — args are a literal list, not a shell string
             argv,
