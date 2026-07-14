@@ -50,12 +50,30 @@ jobs:
       - run: swift --version
       - name: Build + run shared-core smoke test
         run: swift run ArgentUtilsCoreSmoke
+      # Build the static, portable argent-core CLI and hand it to the python-linux
+      # job. The Python front-end shells out to this binary for every prompt, so
+      # its pytest suite needs it present; building it here (once, in the Swift
+      # container) keeps the Swift<->Python golden parity provable in CI.
+      - name: Build argent-core CLI (static, portable)
+        run: |
+          swift build --product argent-core --static-swift-stdlib -c release
+          bin="$(swift build --product argent-core --static-swift-stdlib -c release --show-bin-path)"
+          mkdir -p artifact
+          cp "$bin/argent-core" artifact/argent-core
+      - name: Upload argent-core binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: argent-core-linux
+          path: artifact/argent-core
 
   # The Linux (Qt6/PySide6) front-end. Offline, headless regression tests over the
   # same shared-core logic the GUI renders.
   python-linux:
     name: Python (Linux) · pytest
     runs-on: ubuntu-latest
+    # The prompt tests shell out to argent-core; take the static binary the
+    # swift-core-linux job built rather than installing a Swift toolchain here.
+    needs: swift-core-linux
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -73,9 +91,17 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r linux/requirements.txt pytest
+      - name: Download argent-core binary
+        uses: actions/download-artifact@v4
+        with:
+          name: argent-core-linux
+          path: core-bin
+      - name: Make argent-core executable
+        run: chmod +x core-bin/argent-core
       - name: Run tests (headless Qt)
         env:
           QT_QPA_PLATFORM: offscreen
+          ARGENT_CORE_BIN: ${{ github.workspace }}/core-bin/argent-core
         run: pytest linux/tests -q
 
   # The device-allocator MCP server + daemon. Self-contained Node tests that drive
