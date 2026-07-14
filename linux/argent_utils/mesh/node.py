@@ -405,6 +405,11 @@ class MeshNode:
     ) -> str | None:
         """Handle one link message; returns the peer id it bound to (if any)."""
         t = msg.get("t")
+        # Any message from a bound peer is proof of life — refresh liveness so a
+        # link busy with gossip/dispatch stays `up` even if a heartbeat is missed.
+        bound = self._peer_by_writer(writer)
+        if bound is not None:
+            bound.last_seen = time.monotonic()
         if t == "hello" and str(msg.get("secret", "")) != config.secret():
             # A dialed "peer" that can't present the join token isn't one of
             # ours — tear the link down (ValueError ends _run_link's pump).
@@ -467,6 +472,14 @@ class MeshNode:
             peer.writer = link_writer
             self._bump_and_gossip()  # our `sees` changed
         if fresh:
+            # Relay a genuinely-newer advertisement learned via GOSSIP onward, so a
+            # NodeInfo update converges across a multi-hop topology (A—B—C where A
+            # and C don't link directly), not just a full mesh. Mirrors the
+            # overrides relay. The freshness gate on every receiver stops the echo
+            # from looping. A hello-learned peer is directly connected, so its info
+            # is broadcast by the normal channels — only gossip needs the relay.
+            if link_writer is None:
+                self._broadcast(protocol.node_update(info))
             self._recompute("gossip")
 
     def _drop_peer(self, peer_id: str, reason: str) -> None:

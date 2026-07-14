@@ -230,16 +230,34 @@ recompute assignments.
 
 ### `dispatch`
 
-Ask the receiving node to run a job now. May arrive on a peer link (from the
-dispatcher) or be issued by a control client.
+Ask a node to run work now. `dispatch` has **two shapes** depending on the
+transport — they are distinct and MUST both be supported by their respective
+receivers:
+
+**On a peer link** — a fully-formed [Job](#job) to run *on the receiving node*:
 
 ```json
 {"t": "dispatch", "job": { …Job… }, "v": 1}
 ```
 
-The receiver attempts to run the job locally ([07-dispatch](07-dispatch.md#execution))
-and replies with a [`job-status`](#job-status). On an unauthenticated link a bare
+The receiver runs the job locally ([07-dispatch](07-dispatch.md#execution)) and
+replies with a [`job-status`](#job-status). On an unauthenticated link a bare
 `dispatch` MUST be rejected per [the fence ordering rule](03-transport.md#the-join-fence).
+
+**On a [control session](#control-messages)** — a request to *route* a job through
+the mesh, carrying the `duty` and `prompt` as **top-level** fields (the node mints
+the Job id and does the [slot routing](07-dispatch.md#routing-a-job) itself):
+
+```json
+{"t": "dispatch", "duty": "audit", "prompt": "…the work payload…", "v": 1}
+```
+
+The node replies with a [`dispatch-result`](#dispatch-result) (the per-slot
+outcomes), not a `job-status`. An unknown `duty` yields an [`error`](#ok--error).
+
+> The two shapes exist because a peer link dispatches *one job to this node*, while
+> a control client asks *this node to place a job across the mesh on its behalf*.
+> Don't wrap the control-session form's `duty`/`prompt` in a `job` object.
 
 ### `job-status`
 
