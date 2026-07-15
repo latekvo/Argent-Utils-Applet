@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Candidate adapter for the reference node (``linux/argent_utils/mesh``).
+
+The conformance tester launches a candidate purely through the ``SZPONTNET_*``
+environment (the *candidate contract*). The reference node predates that contract
+and reads its own ``ARGENT_MESH_*`` variables + a ``node.json`` identity file, so
+this thin adapter translates one into the other and then execs the real node. It
+is the worked example every other implementation copies: read ``SZPONTNET_*``,
+configure your node, run it.
+
+Usage (as the tester's --node-cmd):
+
+    python -m szpont --node-cmd "python tools/szpontnet-tester/adapters/reference.py"
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+# repo/tools/szpontnet-tester/adapters/reference.py → repo root is parents[3].
+REPO = Path(__file__).resolve().parents[3]
+LINUX = REPO / "linux"
+
+# SZPONTNET_* → ARGENT_MESH_* protocol/discovery knobs (names differ, values 1:1).
+_MAP = {
+    "SZPONTNET_LOOPBACK": "ARGENT_MESH_LOOPBACK",
+    "SZPONTNET_MCAST_GROUP": "ARGENT_MESH_MCAST_GROUP",
+    "SZPONTNET_MCAST_PORT": "ARGENT_MESH_MCAST_PORT",
+    "SZPONTNET_TCP_BASE": "ARGENT_MESH_TCP_BASE",
+    "SZPONTNET_TCP_SPAN": "ARGENT_MESH_TCP_SPAN",
+    "SZPONTNET_BEACON_SECS": "ARGENT_MESH_BEACON_SECS",
+    "SZPONTNET_HEARTBEAT_SECS": "ARGENT_MESH_HEARTBEAT_SECS",
+    "SZPONTNET_STALE_SECS": "ARGENT_MESH_STALE_SECS",
+    "SZPONTNET_TIMEOUT_SECS": "ARGENT_MESH_TIMEOUT_SECS",
+    "SZPONTNET_ACK_SECS": "ARGENT_MESH_ACK_SECS",
+    "SZPONTNET_STATE_SECS": "ARGENT_MESH_STATE_SECS",
+    "SZPONTNET_SECRET": "ARGENT_MESH_SECRET",
+    "SZPONTNET_PLATFORM": "ARGENT_MESH_PLATFORM",
+    "SZPONTNET_SPAWN": "ARGENT_MESH_SPAWN",
+}
+
+
+def main() -> None:
+    work_dir = Path(os.environ["SZPONTNET_DIR"])
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # The reference persists identity in node.json; write the tester's chosen id.
+    duties = {}
+    try:
+        duties = json.loads(os.environ.get("SZPONTNET_DUTIES", "{}"))
+    except ValueError:
+        pass
+    (work_dir / "node.json").write_text(json.dumps({
+        "id": os.environ["SZPONTNET_NODE_ID"],
+        "name": os.environ.get("SZPONTNET_NODE_NAME", "cand"),
+        "tier": int(os.environ.get("SZPONTNET_TIER", "3")),
+        "tokens": os.environ.get("SZPONTNET_TOKENS", "ok"),
+        "dutiesEnabled": duties,
+    }))
+
+    env = dict(os.environ)
+    for src, dst in _MAP.items():
+        if src in os.environ:
+            env[dst] = os.environ[src]
+    env["ARGENT_MESH_DIR"] = str(work_dir)
+    # Keep the reference's activity feed inside the scenario dir, not real ~/.argent.
+    env["HOME"] = str(work_dir)
+    env["PYTHONPATH"] = os.pathsep.join([str(LINUX), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
+
+    os.chdir(str(LINUX))
+    os.execvpe(sys.executable, [sys.executable, "-m", "argent_utils.mesh"], env)
+
+
+if __name__ == "__main__":
+    main()
