@@ -103,7 +103,7 @@ def _telemetry_fixture(store: Store) -> None:
 
 
 def _mesh_fixture(store: Store) -> None:
-    """Synthetic mesh topology so the 🕸️ column can be eyeballed: a Linux self
+    """Synthetic mesh topology so the ⬡ Mesh screen can be eyeballed: a Linux self
     node, one strong healthy macOS peer, one weak dead macOS peer, and the three
     duties with one platform shortfall. Enables the mesh via the render-only
     override (never persisting to real QSettings, never starting a node)."""
@@ -150,9 +150,9 @@ def run(what: str, out: str) -> int:
     else:
         _fixture(store)
 
-    # The mesh fixture must land before Panel() — the panel reads mesh_enabled to
-    # decide whether its 🕸️ column starts expanded. The wizard modes get it too,
-    # so their "🕸 Run on mesh" row (+ destination preview) is visible.
+    # The mesh fixture must land before Panel() — the MeshView paints from the
+    # store snapshot at construction. The wizard modes get it too, so their
+    # "⬡ Run on mesh" row (+ destination preview) is visible.
     if what in ("mesh", "panel", "settings", "wizard", "conflicts", "audit"):
         _mesh_fixture(store)
 
@@ -173,9 +173,9 @@ def run(what: str, out: str) -> int:
         panel._rebuild_devices()
         panel._update_results()
     elif what == "mesh":
-        # Fixture already applied above; refresh the column from it.
+        # Fixture already applied above; open the Mesh screen and repaint from it.
+        panel._toggle_mesh()
         store.mesh_changed.emit()
-        panel._update_results()
     else:  # panel
         _device_fixture(store)
         _telemetry_fixture(store)
