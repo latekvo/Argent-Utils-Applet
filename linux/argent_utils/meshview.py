@@ -1,8 +1,9 @@
-"""The Argent Mesh topology column — read the LAN, configure the whole mesh.
+"""The Mesh management screen — read the LAN, configure the whole mesh.
 
 The Linux face of Argent Mesh (see ``core/mesh.json`` for the model and
-``argent_utils.mesh`` for the node). It renders the local node's public topology
-snapshot (``~/.argent/mesh/state.json``): a compact wire graph of self + peers,
+``argent_utils.mesh`` for the node). One of the panel's three screens (Actions ·
+Mesh · Settings), it renders the local node's public topology snapshot
+(``~/.argent/mesh/state.json``): a compact wire graph of self + peers,
 one editable card per node (tier / token state — edits apply to *any* node,
 self or peer, forwarded over the mesh so one machine configures the fleet), and
 the duty table (which job classes route where, with a live per-duty placement
@@ -10,14 +11,14 @@ policy the panel edits and the mesh gossips last-writer-wins).
 
 Everything data-dependent rebuilds in place on ``store.mesh_changed`` (the same
 ``_rebuild_* + _clear_layout`` idiom the Panel uses), so the 2s poll never tears
-down the whole column — only the parts whose data actually moved. Reads only;
+down the whole screen — only the parts whose data actually moved. Reads only;
 the one write path is the inline editors, which call the ``store.mesh_*``
 wrappers (those run the control-socket calls off the UI thread).
 """
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -83,7 +85,8 @@ class TopologyGraph(QWidget):
         super().__init__()
         # Tall enough that the ring radius leaves room for a node disc AND its
         # name label without either colliding with the self disc at the centre.
-        self.setFixedHeight(150)
+        # (A bit taller than the old side-column graph — the screen has room.)
+        self.setFixedHeight(190)
         self._self: dict = {}
         self._peers: list[dict] = []
 
@@ -203,11 +206,14 @@ class TopologyGraph(QWidget):
                          label)
 
 
-# MARK: - the column
+# MARK: - the screen
 
 
 class MeshView(QWidget):
-    """The topology column shown at the far left of the panel."""
+    """The Mesh management screen (the panel's third screen, beside Actions and
+    Settings). Emits ``done`` when the user is finished, like SettingsView."""
+
+    done = Signal()
 
     def __init__(self, store: Store) -> None:
         super().__init__()
@@ -228,8 +234,9 @@ class MeshView(QWidget):
         self.state_col.setSpacing(8)
         col.addWidget(self.state_host)
 
-        # Live-topology host: wire graph + node cards + duties. Hidden while an
-        # off/empty state is showing.
+        # Live-topology host: the wire graph up top, node cards and duties as
+        # side-by-side columns below (the screen is wide; a single stacked
+        # column would stretch every card across the whole panel).
         self.live_host = QWidget()
         live = QVBoxLayout(self.live_host)
         live.setContentsMargins(0, 0, 0, 0)
@@ -246,6 +253,9 @@ class MeshView(QWidget):
         )
         live.addWidget(graph_wrap)
 
+        columns = QHBoxLayout()
+        columns.setSpacing(12)
+
         # Node cards
         self.nodes_host = QWidget()
         self.nodes_col = QVBoxLayout(self.nodes_host)
@@ -254,7 +264,10 @@ class MeshView(QWidget):
         self.nodes_host.setStyleSheet(
             "background-color: rgba(128,128,128,0.07); border-radius: 8px;"
         )
-        live.addWidget(self.nodes_host)
+        self.nodes_host.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+        columns.addWidget(self.nodes_host, 1, Qt.AlignmentFlag.AlignTop)
 
         # Duties
         self.duties_host = QWidget()
@@ -264,8 +277,12 @@ class MeshView(QWidget):
         self.duties_host.setStyleSheet(
             "background-color: rgba(128,128,128,0.07); border-radius: 8px;"
         )
-        live.addWidget(self.duties_host)
+        self.duties_host.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum
+        )
+        columns.addWidget(self.duties_host, 1, Qt.AlignmentFlag.AlignTop)
 
+        live.addLayout(columns)
         col.addWidget(self.live_host)
 
         # Control-edit error (CtlError from an inline editor) — a small red line.
@@ -283,12 +300,14 @@ class MeshView(QWidget):
     # MARK: header
 
     def _build_header(self) -> QHBoxLayout:
+        # Screen header, matching SettingsView: title on the left, Done on the
+        # right, with the live node count + status between them.
         row = QHBoxLayout()
         row.setContentsMargins(2, 0, 2, 0)
         row.setSpacing(6)
-        row.addWidget(GlyphLabel(glyphs.G_MESH, 14, glyphs.MUTED, font_px=12))
-        title = QLabel("MESH")
-        title.setStyleSheet("color: palette(mid); font-weight: 700; font-size: 10px;")
+        row.addWidget(GlyphLabel(glyphs.G_MESH, 16, glyphs.MUTED, font_px=14))
+        title = QLabel("Mesh")
+        title.setStyleSheet("font-weight: 700; font-size: 13px;")
         row.addWidget(title)
         self.node_count = QLabel("")
         self.node_count.setStyleSheet(
@@ -302,6 +321,10 @@ class MeshView(QWidget):
         self.status_text = QLabel("")
         self.status_text.setStyleSheet("color: palette(mid); font-size: 9px;")
         row.addWidget(self.status_text)
+        done = QPushButton("Done")
+        done.setStyleSheet("font-weight: 700;")
+        done.clicked.connect(self.done.emit)
+        row.addWidget(done)
         return row
 
     # MARK: rebuild
