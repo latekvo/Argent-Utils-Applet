@@ -88,7 +88,7 @@ default policies, so both compute the **same** `assign_all`
 
 No messages are needed to *agree* — agreement is a consequence of both nodes
 running the same function on the same input. Each writes it to its
-[`state.json`](08-state.md#statejson--the-snapshot).
+[`state.json`](08-state.md#the-statejson-snapshot).
 
 ---
 

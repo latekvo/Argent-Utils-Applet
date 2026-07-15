@@ -45,7 +45,7 @@ resource descriptors, and later the altruism-limit fields) without breaking
 compatibility.
 
 > **Why "advertisement" and not "capabilities"?** A node does not merely *have*
-> resources, it *offers* them. Under the v1 [full-altruism model](README.md#the-trust-model-v1-full-altruism)
+> resources, it *offers* them. Under the v1 [full-altruism model](README.md#the-trust-model-personal-vs-foreign)
 > advertising a resource is a standing offer to use it for the mesh. When altruism
 > limits arrive ([09](09-extensibility.md)), an advertisement gains the ability to
 > also say *under what terms* — but it stays an offer, not a passive inventory.

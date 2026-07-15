@@ -1,4 +1,4 @@
-# 09 — Extensibility & future work
+# 09 - Extensibility & future work
 
 SzpontNet v1 is deliberately small, but it is designed to grow. This chapter is the
 normative contract for evolving it **without breaking changes**, and then applies
@@ -18,7 +18,7 @@ interoperating.
 
 2. **Drop unknown message types, don't die.** A message whose `t` the receiver
    doesn't handle MUST be dropped silently; the link stays open. New message types
-   are therefore additive — old nodes simply don't act on them.
+   are therefore additive - old nodes simply don't act on them.
 
 3. **Tolerate unknown enum values.** Unknown `platform`, `strategy`, `tokens`, or
    `duty` values MUST degrade safely, never error:
@@ -39,19 +39,19 @@ interoperating.
    omits the field) and a new node (which defaults it) MUST behave identically.
 
 6. **Version signaling is additive-first.** Every message carries `v`. A minor,
-   backward-compatible extension **keeps `v: 1`** and relies on rules 1–5; a
+   backward-compatible extension **keeps `v: 1`** and relies on rules 1-5; a
    receiver MAY read `v` to *offer* an enhanced behavior but MUST NOT *require* a
    higher `v` to keep basic interop. A genuinely breaking change (one that violates
-   rules 1–5) **MUST** bump `v` and SHOULD be gated behind capability negotiation
+   rules 1-5) **MUST** bump `v` and SHOULD be gated behind capability negotiation
    (below) so mixed meshes still function.
 
 ### Vocabulary skew
 
 Because the resource vocabulary (platforms, tiers, tokens, duties, strategies) is
 *data* loaded from a shared model, two nodes with **different** models still
-interoperate at the wire level (rules 1–3), but may **place work differently** if,
-say, one knows a duty the other doesn't. This is acceptable and safe — the node
-that doesn't know a duty just treats it opaquely — but for consistent *placement*
+interoperate at the wire level (rules 1-3), but may **place work differently** if,
+say, one knows a duty the other doesn't. This is acceptable and safe - the node
+that doesn't know a duty just treats it opaquely - but for consistent *placement*
 across the mesh, operators SHOULD deploy the same model to every node. A future
 revision MAY gossip a model digest so nodes can warn on skew.
 
@@ -85,7 +85,7 @@ on it. No `v` bump.
 ### Adding a placement strategy
 
 Add a `strategy` id to the model and implement its ranking key. Old nodes that
-receive an override naming it fall back to `weakest-first` (rule 3) — so the mesh
+receive an override naming it fall back to `weakest-first` (rule 3) - so the mesh
 still converges, just with the fallback ranking on old nodes, until they're
 updated.
 
@@ -101,9 +101,9 @@ so a new negative status needs no dispatcher change; a new *positive* status (li
 
 v1 is **full-altruism**: a node accepts any job for a duty it has enabled and is
 [eligible](06-coordination.md#eligibility) for, with no accounting, quota, or
-admission policy ([README](README.md#the-trust-model-v1-full-altruism)). The brief
+admission policy ([README](README.md#the-trust-model-personal-vs-foreign)). The brief
 asks that limits on this altruism be addable *later, without breaking changes*.
-They are — via the recipes above. Here is the concrete design, all additive:
+They are - via the recipes above. Here is the concrete design, all additive:
 
 ### 1. Offered limits (advertisement side)
 
@@ -119,16 +119,22 @@ A node advertises the terms under which it offers resources, as an optional
 ```
 
 Old nodes ignore `limits` (rule 1) and keep treating the node as unconditionally
-available — which is safe, because the *enforcement* lives on the offering node, not
+available - which is safe, because the *enforcement* lives on the offering node, not
 the dispatcher (next point).
 
 ### 2. Enforcement (execution side) reuses the failover path
 
+> **Partially landed.** `job-status` has gained a `declined` status, and nodes now
+> decline via this exact failover path - refusing a **foreign** requester, a
+> **disabled** duty, or being **out of tokens** ([11](11-trust-and-balancing.md),
+> [07 refusal policy](07-dispatch.md#refusal-policy)). The quota-limit enforcement
+> below is the remaining piece; it slots into the same mechanism.
+
 When a dispatched job would exceed a node's advertised limits, the node **declines**
-it: it replies with `job-status` `status: "failed"` (or, once defined, the clearer
-`"rejected"`) and a `reason` like `"over quota"`. The dispatcher's existing logic
-already **fails that slot over to the next candidate** on any non-`spawned` outcome
-([07](07-dispatch.md#routing-a-job)). So:
+it: it replies with `job-status` `status: "declined"` (or the earlier `"failed"`,
+or, once defined, the clearer `"rejected"`) and a `reason` like `"over quota"`. The
+dispatcher's existing logic already **fails that slot over to the next candidate** on
+any non-`spawned` outcome ([07](07-dispatch.md#routing-a-job)). So:
 
 > A policy-declining node is handled by the *exact same code* that already handles a
 > dead node or an out-of-tokens node. This is the crux of why altruism limits are a
@@ -141,7 +147,7 @@ For the mesh to *avoid* over-limit nodes proactively (rather than discovering th
 limit at dispatch time), placement can grow to read `limits` and a node's
 advertised current load, ranking a near-limit node lower. This is a
 [resource-matching extension](05-resources.md#extending-the-resource-vocabulary):
-additive, safe to roll out node-by-node, and purely an optimization — the failover
+additive, safe to roll out node-by-node, and purely an optimization - the failover
 in point 2 remains the correctness backstop.
 
 ### 4. Accounting & reciprocity (further out)
@@ -157,13 +163,19 @@ simply keep behaving altruistically.
 At every step above, a mesh containing both a limits-aware node and a pure v1 node
 functions: the v1 node offers unconditionally and is dispatched to normally; the
 limits-aware node offers conditionally and declines-with-failover when over its
-caps. No flag day, no `v` bump required for the common cases — exactly the
+caps. No flag day, no `v` bump required for the common cases - exactly the
 "extensible without breaking changes" the brief requires.
 
 ## Non-goals for v1 (explicitly deferred)
 
 - **Cross-subnet / WAN operation.** v1 is single-LAN (link-local multicast, subnet
   broadcast). Federation across subnets is future work.
+- **Foreign zero-trust execution.** The two-level trust model (`personal`/`foreign`,
+  keyed on a node's [owner](11-trust-and-balancing.md)) **has landed**, and a foreign
+  requester is [declined](07-dispatch.md#refusal-policy). The full zero-trust path -
+  *running* foreign compute while routing any social action back through a personal
+  node - remains future work; today a foreign request is refused outright rather than
+  sandboxed.
 - **Transport security / authenticated identity.** The [join fence](03-transport.md#the-join-fence)
   is a plaintext gate, not authentication. Mutual TLS or signed advertisements are
   a future, capability-negotiated extension.

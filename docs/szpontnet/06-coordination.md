@@ -1,8 +1,8 @@
-# 06 — Coordination & assignment
+# 06 - Coordination & assignment
 
 This is the heart of SzpontNet: how, with no leader and no messages beyond gossiped
 advertisements, every node agrees on which machine runs each duty. The answer is a
-**pure deterministic function** — `assign` — that every node evaluates over the
+**pure deterministic function** - `assign` - that every node evaluates over the
 same inputs and so produces the same output everywhere. When the inputs change (a
 node joins, dies, or updates its advertisement), every node re-evaluates and
 converges on the new answer without negotiating.
@@ -16,14 +16,14 @@ Interoperability depends on every implementation computing this function
 
 The input to assignment is the set of **live** nodes: the local node plus every
 peer whose [link state](03-transport.md#link-state) is `up` **or** `stale`. A
-`down` peer is excluded. Including `stale` peers is deliberate — a momentary Wi-Fi
+`down` peer is excluded. Including `stale` peers is deliberate - a momentary Wi-Fi
 stall must not bounce ownership; only a full timeout moves work.
 
 Each live node contributes its freshest [NodeInfo](04-messages.md#nodeinfo).
 
 ## Placement policy
 
-Each duty has a **placement policy** — the effective one is the
+Each duty has a **placement policy** - the effective one is the
 [override](#placement-overrides) if present, else the duty's default from the
 model. A policy has three parts:
 
@@ -32,17 +32,17 @@ model. A policy has three parts:
  "spread": [{"platform": "linux", "count": 1}, {"platform": "macos", "count": 1}]}
 ```
 
-- **`strategy`** ∈ {`weakest-first`, `strongest-first`, `local-first`} — the
-  ranking (below).
-- **`tokenAware`** (bool) — whether `tokens: "out"` excludes a node.
-- **`spread`** (array of `{platform, count}`) — platform-coverage requirements;
+- **`strategy`** ∈ {`weakest-first`, `strongest-first`, `local-first`,
+  `surplus-first`} - the ranking (below).
+- **`tokenAware`** (bool) - whether `tokens: "out"` excludes a node.
+- **`spread`** (array of `{platform, count}`) - platform-coverage requirements;
   empty means "any single node".
 
 ## Eligibility
 
 A node is **eligible** for a duty when **both**:
 
-1. it has the duty **enabled** — `dutiesEnabled[duty]` is not `false` (absent =
+1. it has the duty **enabled** - `dutiesEnabled[duty]` is not `false` (absent =
    enabled); and
 2. if the policy is `tokenAware`, its `tokens` is **not** `"out"`.
 
@@ -51,7 +51,7 @@ it is only de-prioritized in the ranking.)
 
 ## Ranking
 
-Eligible nodes are sorted by a **total order** — a tuple whose final element is the
+Eligible nodes are sorted by a **total order** - a tuple whose final element is the
 node `id`, so the order is fully deterministic with no ties. Let
 `tok_rank(tokens)` = `0` for `"ok"`, `1` for `"low"`, `2` for anything else. Then
 the sort key per node `n`, given the local node id `L`, is:
@@ -61,6 +61,10 @@ the sort key per node `n`, given the local node id `L`, is:
 | `weakest-first` (and any **unknown** strategy) | `(tok_rank(n.tokens), −n.tier, n.id)` |
 | `strongest-first` | `(tok_rank(n.tokens), n.tier, n.id)` |
 | `local-first` | `(tok_rank(n.tokens), n.id != L, −n.tier, n.id)` |
+| `surplus-first` | `(−surplus(n), tok_rank(n.tokens), −n.tier, n.id)` |
+
+where `surplus(n)` = `n.stats.quotaLeft − n.stats.usageAvg`, or `0` when the node
+advertises no stats.
 
 Reading the keys:
 
@@ -70,6 +74,10 @@ Reading the keys:
 - **strongest-first** then prefers the *smallest* tier number (strongest machine).
 - **local-first** then prefers the local node (the boolean `n.id != L` sorts
   `False`=local first), then falls back to weakest-first ordering for the rest.
+- **surplus-first** leads with the *most* spare quota (`−surplus` sorts the largest
+  surplus first); ties fall back to weakest-first (token rank, then tier, then id).
+  A neutral-stats node (surplus `0`) ranks exactly as it would under weakest-first,
+  so it never jumps ahead of a node with measured spare budget.
 - **id tie-break** makes the result identical on every node.
 
 > An **unknown** strategy (from a newer peer's override) MUST fall back to
@@ -107,7 +115,7 @@ function assign_duty(duty, live_nodes, overrides, local_id) -> (assigned[], shor
 - **Spread:** each `{platform, count}` requirement is filled from that platform's
   ranked candidates; a node fills **at most one** slot (so "1 linux + 1 macos"
   lands on two distinct machines). Requirements that can't be met are reported as
-  **shortfall** — the duty still gets whatever coverage exists; it is never
+  **shortfall** - the duty still gets whatever coverage exists; it is never
   dropped for being under-covered.
 
 `assign_all` simply runs `assign_duty` for every duty in the model and returns the
@@ -120,12 +128,12 @@ duties enabled.
 
 | Duty / policy | Eligible, ranked | Assigned | Shortfall |
 |---------------|------------------|----------|-----------|
-| `review` weakest-first, no spread | A(t4), C(t4), B(t1) → `A,C,B` | `[A]` | — |
-| `review` strongest-first | B(t1), A(t4)/C(t4) by id | `[B]` | — |
-| `audit` weakest-first, spread 1×linux+1×macos | linux: A; macos: C(t4),B(t1) | `[A, C]` | — |
-| `audit` but only B,C present (no linux) | linux: —; macos: C,B | `[C]` | `[(linux, 1)]` |
-| `review`, but A is `tokens:out` | eligible C,B (A excluded) | `[C]` | — |
-| `review`, A `tokens:low`, others ok | ranked B,C ahead of A | `[C]` | — |
+| `review` weakest-first, no spread | A(t4), C(t4), B(t1) → `A,C,B` | `[A]` | - |
+| `review` strongest-first | B(t1), A(t4)/C(t4) by id | `[B]` | - |
+| `audit` weakest-first, spread 1×linux+1×macos | linux: A; macos: C(t4),B(t1) | `[A, C]` | - |
+| `audit` but only B,C present (no linux) | linux: -; macos: C,B | `[C]` | `[(linux, 1)]` |
+| `review`, but A is `tokens:out` | eligible C,B (A excluded) | `[C]` | - |
+| `review`, A `tokens:low`, others ok | ranked B,C ahead of A | `[C]` | - |
 
 These are exactly the cases asserted in `test_mesh_logic.py`.
 
@@ -134,7 +142,7 @@ These are exactly the cases asserted in `test_mesh_logic.py`.
 For interop, an implementation **MUST**:
 
 - produce assignments that depend only on the live-node advertisements and the
-  effective overrides — never on wall-clock, iteration order, or local state;
+  effective overrides - never on wall-clock, iteration order, or local state;
 - use the exact token ranking and strategy keys above, ending every key with the
   node `id` so there are no ties;
 - treat an unknown strategy as `weakest-first`;
@@ -142,7 +150,7 @@ For interop, an implementation **MUST**:
 
 Two conformant nodes with the same live set and overrides **MUST** compute
 byte-identical assignments. The reference test `test_assignment_is_permutation_invariant`
-checks that input order cannot change the result — a good property to replicate.
+checks that input order cannot change the result - a good property to replicate.
 
 ## Placement overrides
 
@@ -172,10 +180,31 @@ over what it holds; on adopting, it re-gossips them and recomputes. An edit bump
 This gives eventual convergence: concurrent edits on different nodes get the same
 `rev`, the `updatedBy` tie-break picks one deterministic winner, and it propagates
 to all. `duties` carries the *whole* policy per duty so a merge never has to
-combine partial edits — the winning `duties` map replaces the loser's wholesale.
+combine partial edits - the winning `duties` map replaces the loser's wholesale.
 
 A duty **not** present in `duties` uses its model default. To reset a duty to
 default, an implementation MAY omit it from a new (higher-`rev`) `duties` map.
+
+## Placement strategy vs dispatch strategy
+
+Two separate rankings, easily confused, do different jobs:
+
+- A duty's **placement `strategy`** drives the **stable displayed ownership** - what
+  the topology panel shows as the duty's owner. It is recomputed by consensus
+  (`assign_all` over the shared inputs), so every node shows the same owner and it
+  only moves when the inputs move.
+- The **dispatch-time target selection** is a **separate, dispatcher-local choice**.
+  When a node actually dispatches a request it ranks candidates by
+  `dispatchStrategy` (default `surplus-first`) via
+  `slot_candidates(…, strategy=…)` - its `strategy` argument overrides only the
+  *ranking*, not eligibility or spread. This decision is made **unilaterally** from
+  the dispatcher's own gossiped view, with **no consensus**.
+
+That separation is deliberate: fast-moving `stats` load-balance dispatch to whoever
+has the most spare quota *without* churning the displayed owner, which stays put on
+its stable placement strategy. See [07-dispatch](07-dispatch.md) for how a chosen
+target is executed and [11-trust-and-balancing](11-trust-and-balancing.md) for the
+accounting the surplus ranking reads.
 
 ## Why leaderless works, briefly
 
@@ -185,6 +214,6 @@ inputs change identically everywhere (a gossiped advertisement, a timed-out peer
 an adopted override), the computed owner changes identically everywhere. Dispatch
 ([07](07-dispatch.md)) then *acts* on that shared computation. There is a brief
 window between an event and gossip reaching every node during which two nodes may
-hold different views — this is why dispatch carries a **failover list** rather than
+hold different views - this is why dispatch carries a **failover list** rather than
 trusting a single computed owner, and why work is never *enforced* to be exclusive
-in v1 (see the [trust model](README.md#the-trust-model-v1-full-altruism)).
+in v1 (see the [trust model](README.md#the-trust-model-personal-vs-foreign)).

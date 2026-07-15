@@ -1,4 +1,4 @@
-# 10 — Conformance
+# 10 - Conformance
 
 This chapter defines what it means to *be a SzpontNet v1 node*: the mandatory
 behavior, the optional roles, and interop test vectors you can check an
@@ -19,7 +19,7 @@ A node fills one or more roles. Requirements scale with the roles claimed.
 
 ## Minimal node
 
-A **Participant** — the smallest conformant node — **MUST**:
+A **Participant** - the smallest conformant node - **MUST**:
 
 1. **Identity.** Have a stable, mesh-unique `id` that survives restart
    ([08](08-state.md#nodejson)); take a higher `epoch` each process start.
@@ -44,14 +44,17 @@ A **Participant** — the smallest conformant node — **MUST**:
    [`overrides`](04-messages.md#overrides) by freshness/LWW, re-propagate only
    genuinely newer information, and never re-propagate stale info.
 9. **Assign.** Compute [`assign_all`](06-coordination.md#the-assignment-algorithm)
-   deterministically over the live set — identical output to any other conformant
-   node with the same inputs — and recompute on every relevant change.
+   deterministically over the live set - identical output to any other conformant
+   node with the same inputs - and recompute on every relevant change.
 10. **Tolerate.** Ignore unknown fields, drop unknown message types, never crash on
     malformed input ([09](09-extensibility.md#the-compatibility-contract)).
 
 An **Executor** additionally **MUST** handle inbound [`dispatch`](04-messages.md#dispatch)
 on authenticated links and reply with a truthful
-[`job-status`](04-messages.md#job-status) (`spawned`/`failed`).
+[`job-status`](04-messages.md#job-status) (`spawned`/`failed`, and `declined` if it
+implements the [trust/refusal layer](11-trust-and-balancing.md)). A Dispatcher
+**MUST** treat any non-`spawned` status - including a `declined` it doesn't
+understand - as a failover trigger, never an error.
 
 A **Dispatcher** additionally **MUST** route a job via
 [`slot_candidates`](07-dispatch.md#slots) with per-slot failover, one node per slot,
@@ -80,7 +83,7 @@ reference asserts all of them in
 [`test_mesh_logic.py`](../../linux/tests/test_mesh_logic.py) (pure) and
 [`test_mesh_node.py`](../../linux/tests/test_mesh_node.py) (real sockets).
 
-### V1 — placement (pure, no sockets)
+### V1 - placement (pure, no sockets)
 
 Fleet `A`=linux/tier4/ok, `B`=macos/tier1/ok, `C`=macos/tier4/ok, all duties
 enabled, default policies:
@@ -99,7 +102,7 @@ enabled, default policies:
 **Permutation invariance:** shuffling the input node order MUST NOT change any
 assignment.
 
-### V2 — codec round-trips
+### V2 - codec round-trips
 
 - `encode`→`decode` of every message type yields an equal object (modulo the
   defaulted `v`).
@@ -108,14 +111,14 @@ assignment.
 - A NodeInfo with no `id` is invalid; one with a non-numeric `tier` is invalid; one
   with only `id` fills all other fields with defaults.
 
-### V3 — freshness & LWW
+### V3 - freshness & LWW
 
 - For one `id`, `(epoch=200, seq=1)` supersedes `(epoch=100, seq=50)` (epoch wins
   over seq); within an epoch, higher `seq` wins.
 - Overrides LWW: higher `rev` wins; equal `rev` breaks on `updatedBy`; the winner is
   the same on every node.
 
-### V4 — live multi-node (real sockets)
+### V4 - live multi-node (real sockets)
 
 Booting three real nodes on loopback:
 
@@ -128,12 +131,12 @@ Booting three real nodes on loopback:
 - killing a node moves its duties on every survivor and marks it `down`;
 - restarting a node re-links as a new incarnation.
 
-### V5 — the join fence
+### V5 - the join fence
 
 - With a secret set, a wrong-secret node never links; a wrong-secret control client
   can't drive the node.
 - **Critical:** a spoofed beacon that induces a dial, followed by a naked
-  `dispatch` (no hello, no secret), MUST NOT spawn anything — the
+  `dispatch` (no hello, no secret), MUST NOT spawn anything - the
   [authentication-ordering rule](03-transport.md#the-join-fence) rejects it. (The
   reference test `test_outbound_dial_fence_rejects_naked_dispatch` drives exactly
   this and fails if the gate is removed.)

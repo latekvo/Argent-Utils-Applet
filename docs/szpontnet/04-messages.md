@@ -1,4 +1,4 @@
-# 04 — Message reference
+# 04 - Message reference
 
 Every SzpontNet message is a JSON object with a string **type** field `t` and an
 integer **version** field `v` (default `1`), encoded as one newline-terminated
@@ -18,7 +18,7 @@ peer TCP link; **ctl** = sent on a control session (client↔node).
 | [`heartbeat`](#heartbeat) | link | both | liveness keep-alive |
 | [`set-attr`](#set-attr) | link / ctl | to a node | change a node's advertised attributes |
 | [`dispatch`](#dispatch) | link / ctl | to a node | run a job here |
-| [`job-status`](#job-status) | link | reply | outcome of a dispatch |
+| [`job-status`](#job-status) | link | reply | outcome of a dispatch (`spawned` / `declined` / `failed`) |
 | [`ctl`](#ctl) | ctl | client→node, first message | opens a control session |
 | [`status`](#status) | ctl | client→node | request the state snapshot |
 | [`state`](#state) | ctl | node→client | the state snapshot (reply to `status`) |
@@ -51,6 +51,8 @@ The resource advertisement for one node. Appears inside `hello` and `node`, and
   "seq": 12,
   "sees": ["bd4eaf7671d24b9792bcfd09762ac5b5"],
   "dutiesEnabled": {"audit": false},
+  "owner": "alice",
+  "stats": {"plan": "max-20x", "usageAvg": 3.1, "quotaLeft": 20.0},
   "v": 1
 }
 ```
@@ -59,15 +61,23 @@ The resource advertisement for one node. Appears inside `hello` and `node`, and
 |-------|------|------|---------|
 | `id` | string | **yes** | stable, mesh-unique node id. A NodeInfo without a usable `id` is invalid and MUST be dropped. |
 | `name` | string | no (`"?"`) | human label; presentation only, never used for identity or placement. |
-| `platform` | string | no (`"unknown"`) | machine kind (`"linux"`, `"macos"`, …); a *resource* — see [05](05-resources.md#platform). |
-| `tier` | int | no (`3`) | machine strength, 1 = strongest — see [05](05-resources.md#tier). |
-| `tokens` | string | no (`"ok"`) | budget availability: `"ok"`/`"low"`/`"out"` — see [05](05-resources.md#tokens). |
+| `platform` | string | no (`"unknown"`) | machine kind (`"linux"`, `"macos"`, …); a *resource* - see [05](05-resources.md#platform). |
+| `tier` | int | no (`3`) | machine strength, 1 = strongest - see [05](05-resources.md#tier). |
+| `tokens` | string | no (`"ok"`) | budget availability: `"ok"`/`"low"`/`"out"` - see [05](05-resources.md#tokens). |
 | `tcpPort` | int | no (`0`) | the node's TCP listen port. |
 | `epoch` | float | no (`0`) | incarnation stamp; increases each process (re)start. |
 | `seq` | int | no (`0`) | per-incarnation update counter. |
 | `sees` | array<string> | no (`[]`) | ids of peers this node currently holds a link to (for topology display + partition awareness). |
 | `dutiesEnabled` | object<string,bool> | no (`{}`) | per-duty opt-out; a duty absent from the map is **enabled** by default. |
+| `owner` | string | no (`""`) | trust-domain id - who owns this node. A peer sharing our owner is *personal*, a different owner is *foreign*; empty = unset. See [11-trust-and-balancing](11-trust-and-balancing.md). |
+| `stats` | object | no (`{}`) | load-balancing accounting: `{"plan", "usageAvg", "quotaLeft"}` in plan-relative units. See [05-resources](05-resources.md#per-node-stats-account-aware-load-balancing) and [11](11-trust-and-balancing.md). |
 | `v` | int | no (`1`) | protocol version of this advertisement. |
+
+`owner` and `stats` are **additive and optional**: both are **omitted from the
+wire form when empty**, so a v1 advertisement that sets neither is byte-identical
+to before. The `stats` sub-keys are `plan` (string, account-type id, e.g.
+`max-20x`), `usageAvg` (float, 21-day rolling average of usage per day), and
+`quotaLeft` (float, remaining capacity in the current window).
 
 **Freshness.** Two NodeInfos for the same `id` are ordered by the tuple
 `(epoch, seq)`: the larger wins. A restart (higher `epoch`) always supersedes the
@@ -81,7 +91,9 @@ type (e.g. `tier` is `"abc"`), the whole NodeInfo is invalid and MUST be dropped
 
 ### Job
 
-A unit of dispatched work.
+A unit of dispatched work. A Job is the payload of what the spec and UI call a
+**SzpontRequest** (the user-facing name for a dispatched unit of work); the wire
+type stays [`dispatch`](#dispatch) carrying a `job`.
 
 ```json
 {
@@ -110,7 +122,7 @@ A Job missing `id` or `duty` is invalid and MUST be dropped.
 ### `beacon`
 
 UDP presence advert. Small enough for one datagram; sent to the multicast group
-and (off loopback) the subnet broadcast — see [02-discovery](02-discovery.md).
+and (off loopback) the subnet broadcast - see [02-discovery](02-discovery.md).
 
 ```json
 {"t": "beacon", "id": "3236…", "name": "softoobox",
@@ -125,7 +137,7 @@ and (off loopback) the subnet broadcast — see [02-discovery](02-discovery.md).
 | `tcpPort` | int | **the port to dial for a link.** Receiver MUST ignore the beacon if missing/≤0. |
 | `epoch` | float | sender's incarnation; a higher value than a linked peer's means it restarted. |
 
-The beacon intentionally omits `tier`/`tokens`/`dutiesEnabled` — the authoritative
+The beacon intentionally omits `tier`/`tokens`/`dutiesEnabled` - the authoritative
 advertisement travels in the [`hello`](#hello), keeping beacons tiny.
 
 ---
@@ -136,8 +148,8 @@ advertisement travels in the [`hello`](#hello), keeping beacons tiny.
 
 First message on a peer link, sent by **both** sides (the dialer sends it on
 connect; the accepter sends it in reply). Carries the sender's full advertisement,
-its current placement overrides, and — if a [join fence](03-transport.md#the-join-fence)
-is configured — the shared secret.
+its current placement overrides, and - if a [join fence](03-transport.md#the-join-fence)
+is configured - the shared secret.
 
 ```json
 {"t": "hello",
@@ -161,7 +173,7 @@ unauthenticated link MUST enforce before accepting anything other than a hello.
 
 ### `node`
 
-A gossiped advertisement update — the sender relaying a (possibly other node's)
+A gossiped advertisement update - the sender relaying a (possibly other node's)
 fresher NodeInfo across the mesh.
 
 ```json
@@ -231,10 +243,10 @@ recompute assignments.
 ### `dispatch`
 
 Ask a node to run work now. `dispatch` has **two shapes** depending on the
-transport — they are distinct and MUST both be supported by their respective
+transport - they are distinct and MUST both be supported by their respective
 receivers:
 
-**On a peer link** — a fully-formed [Job](#job) to run *on the receiving node*:
+**On a peer link** - a fully-formed [Job](#job) to run *on the receiving node*:
 
 ```json
 {"t": "dispatch", "job": { …Job… }, "v": 1}
@@ -244,7 +256,7 @@ The receiver runs the job locally ([07-dispatch](07-dispatch.md#execution)) and
 replies with a [`job-status`](#job-status). On an unauthenticated link a bare
 `dispatch` MUST be rejected per [the fence ordering rule](03-transport.md#the-join-fence).
 
-**On a [control session](#control-messages)** — a request to *route* a job through
+**On a [control session](#control-messages)** - a request to *route* a job through
 the mesh, carrying the `duty` and `prompt` as **top-level** fields (the node mints
 the Job id and does the [slot routing](07-dispatch.md#routing-a-job) itself):
 
@@ -254,6 +266,11 @@ the Job id and does the [slot routing](07-dispatch.md#routing-a-job) itself):
 
 The node replies with a [`dispatch-result`](#dispatch-result) (the per-slot
 outcomes), not a `job-status`. An unknown `duty` yields an [`error`](#ok--error).
+
+An optional `target` field (a node id) names one node to run the request on
+directly - the dispatcher's unilateral pick, with **no failover**. When `target`
+is absent the node ranks candidates itself (surplus-first). The peer-link shape is
+unchanged (it carries a `job`, never a `target`).
 
 > The two shapes exist because a peer link dispatches *one job to this node*, while
 > a control client asks *this node to place a job across the mesh on its behalf*.
@@ -270,14 +287,20 @@ The outcome of a `dispatch`, sent back to the dispatcher.
 | Field | Type | Meaning |
 |-------|------|---------|
 | `id` | string | the Job id this is answering. |
-| `status` | string | `"spawned"` (the node started the work) or `"failed"`. |
-| `reason` | string | human-readable failure detail when `status` = `"failed"`; else `""`. |
+| `status` | string | `"spawned"` (the node started the work), `"declined"` (refused for policy), or `"failed"`. |
+| `reason` | string | human-readable detail when `status` = `"declined"` or `"failed"`; else `""`. |
 | `node` | string | the id of the node reporting (the executor). |
 
-> v1 defines exactly two statuses: `spawned` and `failed`. `spawned` means the
-> node *accepted and started* the work, not that the work *completed* — SzpontNet
-> tracks placement and hand-off, not job completion. Additional statuses are a
-> reserved extension ([09](09-extensibility.md)).
+> v1 defines three statuses: `spawned`, `declined`, and `failed`. `spawned` means
+> the node *accepted and started* the work, not that the work *completed* -
+> SzpontNet tracks placement and hand-off, not job completion. `declined` means the
+> receiver **refused for policy** - a foreign requester, a locally-disabled duty, or
+> being out of tokens - with the `reason` explaining it.
+>
+> The dispatcher treats any non-`spawned` status (both `failed` and `declined`) as
+> "this candidate didn't take it - fail over to the next." The sole exception is an
+> explicit [`target`](#dispatch): that outcome is reported as-is, with no failover.
+> Additional statuses are a reserved extension ([09](09-extensibility.md)).
 
 ---
 
@@ -312,7 +335,7 @@ Reply: one [`state`](#state) message.
 ### `state`
 
 The node's state snapshot, sent in reply to `status`. Its `state` field has the
-same shape as the persisted [`state.json`](08-state.md#statejson--the-snapshot) — the whole
+same shape as the persisted [`state.json`](08-state.md#the-statejson-snapshot) - the whole
 topology as this node sees it.
 
 ```json
@@ -325,7 +348,7 @@ topology as this node sees it.
 }, "v": 1}
 ```
 
-See [08-state](08-state.md#statejson--the-snapshot) for the full snapshot schema.
+See [08-state](08-state.md#the-statejson-snapshot) for the full snapshot schema.
 
 ### `set-overrides`
 

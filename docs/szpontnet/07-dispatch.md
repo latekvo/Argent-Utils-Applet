@@ -1,11 +1,16 @@
-# 07 — Dispatch
+# 07 - Dispatch
 
 Assignment ([06](06-coordination.md)) decides *who should* run a duty. **Dispatch**
 is the act of actually running one now: staging a job, routing it to the chosen
 node(s), and failing over if a chosen node can't take it. Dispatch is optional for
-a node that only wants to *offer* resources — but any node that wants to *originate*
+a node that only wants to *offer* resources - but any node that wants to *originate*
 work implements it, and any node that accepts work implements the receiving half
 ([execution](#execution)).
+
+> A dispatched unit of work is what the UI and this spec call a **SzpontRequest**.
+> On the wire it stays a [`dispatch`](04-messages.md#dispatch) message carrying a
+> [`job`](04-messages.md#job); "SzpontRequest" is just the name for that one
+> request-to-run.
 
 ## Jobs
 
@@ -15,7 +20,7 @@ dispatcher assigns a fresh unique `id` per job.
 
 ## Slots
 
-A duty's placement may require **spread** across platforms ([06](06-coordination.md#placement-policy)) —
+A duty's placement may require **spread** across platforms ([06](06-coordination.md#placement-policy)) -
 e.g. the `audit` duty runs on *one Linux and one macOS node*. Dispatch therefore
 runs **one job per slot**:
 
@@ -39,10 +44,16 @@ function slot_candidates(duty, live_nodes, overrides, local_id) -> [(slot_label,
 ```
 
 The candidate list for a slot is the assigned node **first**, then every other
-eligible node of that platform by rank — so a slot survives its top pick dropping
+eligible node of that platform by rank - so a slot survives its top pick dropping
 out between gossip rounds.
 
 ## Routing a job
+
+**Target selection is the dispatcher's own load-balancing call - no consensus.**
+The dispatcher ranks the eligible candidates itself and forwards; peers do not vote
+on where work lands. By default candidates are ranked **surplus-first** (config
+`dispatchStrategy`), so work flows to the node with the most spare quota
+([11](11-trust-and-balancing.md)).
 
 To dispatch a duty, a node:
 
@@ -69,11 +80,21 @@ for (slot_label, candidates) in slot_candidates(...):
 return results
 ```
 
-A slot whose every candidate declines (or that has no candidates) ends `failed` —
+A slot whose every candidate declines (or that has no candidates) ends `failed` -
 the dispatch as a whole is "partial" but the other slots still ran. This is the same
-shape whether a candidate declines because it is **dead**, **out of tokens**, or —
-under a [future altruism limit](09-extensibility.md#the-altruism-limits-roadmap) —
+shape whether a candidate declines because it is **dead**, **out of tokens**, or -
+under a [future altruism limit](09-extensibility.md#the-altruism-limits-roadmap) -
 **over quota**: any non-`spawned` outcome simply advances to the next candidate.
+
+### Explicit target
+
+The client may name a single node to run the SzpontRequest, bypassing surplus-first
+selection entirely. An explicit **target** produces one slot with that node as its
+*only* candidate and therefore **no failover**: the request goes there, and if that
+node **declines** the decline is reported as-is (the slot ends non-`spawned`; it is
+not retried elsewhere). This is the "Alice may forward everything to Bob, and Bob may
+refuse" case - the dispatcher's load-balancing default is overridden, but the
+receiver's [refusal policy](#execution) still applies.
 
 ## Placing on a node
 
@@ -91,14 +112,34 @@ under a [future altruism limit](09-extensibility.md#the-altruism-limits-roadmap)
 ## Execution
 
 The **receiving half** of dispatch. A node that receives a
-[`dispatch`](04-messages.md#dispatch) — on an
-[authenticated](03-transport.md#the-join-fence) link, or from a control client —
+[`dispatch`](04-messages.md#dispatch) - on an
+[authenticated](03-transport.md#the-join-fence) link, or from a control client -
 **runs the job locally** and replies with a [`job-status`](04-messages.md#job-status):
 
 - On success (the work was started): `status: "spawned"`.
-- On failure (the node could not start it — e.g. no way to launch it here):
+- On failure (the node could not start it - e.g. no way to launch it here):
   `status: "failed"` with a human `reason`; the dispatcher fails the slot over to
   the next candidate.
+
+### Refusal policy
+
+Before running, the receiver applies its own **admission** check - its own call, no
+consensus needed. It replies [`declined`](04-messages.md#job-status) (a `job-status`
+status) rather than running when any of:
+
+- the requester is **foreign** (a different [owner](11-trust-and-balancing.md)). The
+  zero-trust path - run the compute here but route any social action back through a
+  *personal* node - is not built yet, so a stranger's request is declined rather than
+  acted on on their behalf;
+- the duty is **disabled** locally (the node opted out of that class of work);
+- the node is **out of tokens** (this is Bob refusing the job Alice sent anyway,
+  which the protocol expressly allows).
+
+The dispatcher needs **no new logic** for this: its failover treats `declined`
+exactly like `failed` - any non-`spawned` outcome fails the slot over (or, for an
+[explicit target](#explicit-target), is reported as-is). See
+[11 - Trust & balancing](11-trust-and-balancing.md) for the trust model behind the
+foreign check.
 
 What "run locally" *means* is implementation-defined and outside the wire protocol.
 Argent Mesh stages the `prompt` to a file and opens a terminal running an agent on
@@ -118,6 +159,10 @@ performs the routing above and replies with a
 [`dispatch-result`](04-messages.md#dispatch-result) carrying the per-slot outcomes.
 This is how the topology panel's "run on mesh" and the CLI's `--dispatch` work: the
 client talks only to its local node, which does the mesh routing on its behalf.
+
+The control `dispatch` command takes an optional `target` (a node id): when present,
+the local node routes to that node with a single-candidate slot and no failover (the
+[explicit target](#explicit-target) case) instead of surplus-first selection.
 
 ## Idempotency & duplicates
 

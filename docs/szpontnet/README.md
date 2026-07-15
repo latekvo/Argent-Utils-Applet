@@ -1,19 +1,19 @@
-# SzpontNet — a LAN peer-to-peer resource-sharing protocol
+# SzpontNet - a LAN peer-to-peer resource-sharing protocol
 
 **Version 1 (`v: 1`).** This directory is the normative specification for
 **SzpontNet**: a small, leaderless protocol that lets the machines on a local
 network find each other, **advertise the resources they have available**, and
-hand work to whichever machine is the best fit — with no central coordinator and
+hand work to whichever machine is the best fit - with no central coordinator and
 automatic take-over when a machine drops.
 
 SzpontNet is the *protocol*. **Argent Mesh** (in this repository under
 [`linux/argent_utils/mesh/`](../../linux/argent_utils/mesh)) is its reference
 implementation; the shared constants live in
 [`core/mesh.json`](../../core/mesh.json). This spec is written so that a second,
-independent implementation — in any language — can join the same mesh and
+independent implementation - in any language - can join the same mesh and
 interoperate byte-for-byte with the reference one.
 
-> The name is deliberately informal (Polish *szpont/spont* — "on a whim",
+> The name is deliberately informal (Polish *szpont/spont* - "on a whim",
 > impromptu): you power a machine on, it spontaneously joins, offers what it has,
 > and takes on work. No registration, no server, no config beyond an optional
 > shared secret.
@@ -24,12 +24,12 @@ interoperate byte-for-byte with the reference one.
 
 Every participating machine runs a **node**. A node **beacons** its presence over
 UDP (multicast + broadcast). Nodes that hear each other open a single **TCP link**
-per pair and exchange a **hello** carrying that node's *resource advertisement* —
+per pair and exchange a **hello** carrying that node's *resource advertisement* -
 what platform it is, how strong a machine it is (its *tier*), how much budget it
 has left (its *token* state), and which classes of work (*duties*) it is willing
 to run. Nodes gossip these advertisements so every node holds the same view of the
 mesh. Because every node runs the **same deterministic placement function** over
-that shared view, they all agree — with no election — on which machine owns each
+that shared view, they all agree - with no election - on which machine owns each
 duty; when a machine dies or runs dry, every survivor has *already* recomputed and
 the work has moved. Any node can then **dispatch** a job, and the mesh routes it to
 the chosen machine(s), failing over if the first pick can't take it.
@@ -46,12 +46,15 @@ the chosen machine(s), failing over if the first pick can't take it.
 3. **Resource-advertisement first.** A node's whole purpose on the wire is to say
    *"here is what I can do"*; the protocol is the machinery that turns those
    advertisements into placement decisions.
-4. **Full trust / altruism (v1).** Every node offers its resources freely and
-   accepts any job for a duty it has enabled. There is no accounting, payment, or
-   admission policy beyond eligibility. This is a deliberate v1 simplification.
+4. **Trust scoped to your own fleet.** A node runs a request from one of *your
+   own* devices (a **personal** peer) directly, as if you'd triggered it locally;
+   a request from **someone else's** device (a **foreign** peer) is declined until
+   the zero-trust foreign path exists. With no owners configured every peer is
+   personal, so this reduces to full altruism. See
+   [11-trust-and-balancing](11-trust-and-balancing.md).
 5. **Extensible without breaking changes.** The trust model, the resource
    vocabulary, the duty catalog and the placement strategies are all designed to
-   grow — in particular so that **limits on altruism** (quotas, caps, priorities,
+   grow - in particular so that **limits on altruism** (quotas, caps, priorities,
    accounting) can be added later without any v1 node needing to change. The rules
    that make this safe are normative; see [09-extensibility](09-extensibility.md).
 6. **Tolerant.** Unknown fields are ignored, unknown message types are dropped,
@@ -59,26 +62,37 @@ the chosen machine(s), failing over if the first pick can't take it.
 
 ---
 
-## The trust model (v1): full altruism
+## The trust model: personal vs foreign
 
-SzpontNet v1 assumes the LAN is **cooperative and trusted**. Concretely:
+SzpontNet started as **full altruism** - a cooperative, trusted LAN where every
+node accepts any job. That is still the behavior when no node sets an **owner**.
+On top of it sits a two-level trust model
+([11-trust-and-balancing](11-trust-and-balancing.md)):
 
-- Any node may join the mesh (or any node presenting the shared secret, if one is
-  configured — see [03-transport](03-transport.md#the-join-fence)).
-- A node **advertises its resources honestly** and **accepts any dispatched job**
-  for a duty it has locally enabled and is eligible for. It does not weigh cost,
-  fairness, or its own load beyond the coarse `tokens` signal.
-- There is **no reservation, no accounting, no admission control**. Placement is
-  advisory-by-consensus: every node computes the same owner, and dispatch honors
-  it, but nothing *enforces* that only the owner runs a job.
+- **personal** - a peer that shares your `owner` (one of your own devices). Its
+  **SzpontRequests** (the name for a dispatched unit of work) run **directly**, as
+  if you'd triggered the work from that machine's own panel. Within your fleet
+  this is exactly the original full altruism.
+- **foreign** - a peer with a different owner (someone else's device). Its
+  requests are **declined** in v1. The future zero-trust design lets a foreign
+  node run the *compute* but routes any **social action** (submitting a PR,
+  commenting on GitHub) back through one of your personal nodes before it happens;
+  until that lands, declining is the safe default.
 
-This is intentional. The whole point of v1 is to be small enough to implement in
-an afternoon. Everything needed to later constrain that altruism — per-peer
-quotas, max-concurrent-jobs, priority classes, cost accounting, accept/reject
-policies — is reserved as additive extension points and specified in
-[09-extensibility](09-extensibility.md#the-altruism-limits-roadmap), so a future
-`v: 2` (or even a capability-negotiated v1 extension) can add them without
-breaking the wire compatibility described here.
+The classification is opt-in and safe by default: **if either side hasn't set an
+owner, the peer is personal**, so an owner-less mesh behaves precisely as the
+trusting core did. The join fence ([03-transport](03-transport.md#the-join-fence))
+still gates *who may join*; trust is the finer, per-owner question of *whose
+requests a node will act on*.
+
+**Load balancing and refusals.** Beyond eligibility, a dispatcher picks a target
+by **surplus** - the node with the most spare quota, account-type aware (Max 5x vs
+20x) - computed from a 21-day usage average and remaining quota that each node
+advertises. The choice is the dispatcher's alone (no consensus): it may even
+forward everything to one peer, and that peer may **refuse** (a first-class
+`declined` outcome). The remaining knobs on altruism - per-peer caps, priority
+classes, cost accounting - stay reserved as additive extension points in
+[09-extensibility](09-extensibility.md#the-altruism-limits-roadmap).
 
 ---
 
@@ -88,7 +102,7 @@ The chapters are ordered so you can implement bottom-up:
 
 | # | Chapter | What you implement from it |
 |---|---------|----------------------------|
-| — | [README](README.md) (this file) | the mental model, goals, trust model |
+| - | [README](README.md) (this file) | the mental model, goals, trust model |
 | 01 | [Model & terminology](01-model.md) | the nouns: node, advertisement, duty, placement, dispatch |
 | 02 | [Discovery](02-discovery.md) | UDP beacons, the multicast/broadcast pair, the "smaller id dials" rule |
 | 03 | [Transport & security](03-transport.md) | TCP links, NDJSON framing, the link state machine, the join fence |
@@ -99,8 +113,9 @@ The chapters are ordered so you can implement bottom-up:
 | 08 | [State & persistence](08-state.md) | `node.json`, `state.json`, liveness, incarnations |
 | 09 | [Extensibility & future work](09-extensibility.md) | the compatibility rules + the altruism-limits roadmap |
 | 10 | [Conformance](10-conformance.md) | MUST/SHOULD/MAY, a minimal-node checklist, interop vectors |
-| A | [Appendix A — annotated trace](appendix-a-trace.md) | a full two-node session, message by message |
-| B | [Appendix B — constants](appendix-b-constants.md) | every default value in one table |
+| 11 | [Trust & load balancing](11-trust-and-balancing.md) | personal/foreign trust, per-node quota stats, surplus-first dispatch, refusals |
+| A | [Appendix A - annotated trace](appendix-a-trace.md) | a full two-node session, message by message |
+| B | [Appendix B - constants](appendix-b-constants.md) | every default value in one table |
 
 ### Notation
 
@@ -108,7 +123,7 @@ The chapters are ordered so you can implement bottom-up:
   used as in [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119): they mark
   interoperability requirements, not implementation advice.
 - Wire examples are JSON. On the wire each message is a single line of compact
-  JSON (no interior newlines) terminated by `\n` — see
+  JSON (no interior newlines) terminated by `\n` - see
   [03-transport](03-transport.md#framing). Examples here are shown pretty-printed
   for readability; the newline-free encoding is what actually travels.
 - `int`, `float`, `string`, `bool`, `object`, `array` refer to JSON types.
