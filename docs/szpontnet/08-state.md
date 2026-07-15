@@ -1,13 +1,14 @@
 # 08 - State & persistence
 
-A node keeps three on-disk files and one in-memory topology it publishes. None of the
+A node keeps four machine-local files - `node.json`, `device.key`, `trusted.json`,
+and `stats.json` - plus the `state.json` topology snapshot it publishes. None of the
 files are part of the wire protocol - two implementations interoperate purely over
 [messages](04-messages.md) - but they are specified here because the reference
 implementation's UIs and CLI read them, and a compatible implementation that wants
 to drive those tools should match the shapes.
 
-Both files are written **atomically** (write a temp file, then rename over the
-target) so a concurrent reader never sees a torn file, and both are best-effort
+All four are written **atomically** (write a temp file, then rename over the
+target) so a concurrent reader never sees a torn file, and all are best-effort
 (an unwritable home directory is non-fatal - the node keeps running with in-memory
 state).
 
@@ -25,8 +26,7 @@ restart.
   "name": "softoobox",
   "tier": 4,
   "tokens": "ok",
-  "dutiesEnabled": {"audit": false},
-  "owner": "alice"
+  "dutiesEnabled": {"audit": false}
 }
 ```
 
@@ -37,7 +37,11 @@ restart.
 | `tier` | clamped to the model's `[min, max]` on load. |
 | `tokens` | one of `"ok"`/`"low"`/`"out"`; anything else resets to `"ok"`. |
 | `dutiesEnabled` | per-duty opt-out map. |
-| `owner` | optional [trust domain](11-trust-and-balancing.md) - a stable id for whoever owns this node. Omitted from the file when empty (unset ⇒ every peer is personal, the v1 full-trust default). The reference also reads `ARGENT_MESH_OWNER`; the file value wins when both are set. |
+
+Trust is **not** persisted here: a node's identity is its Ed25519 key
+([`device.key`](#devicekey)) and who it trusts is a separate local allowlist
+([`trusted.json`](#trustedjson)); neither is a `node.json` field and neither is
+gossiped. See [11-trust-and-balancing](11-trust-and-balancing.md).
 
 On first run (no file, or a corrupt one), a node mints a fresh `id`, fills defaults,
 and **persists immediately** so the id is stable across the very next restart.
@@ -60,9 +64,54 @@ than failing silently. Give each machine its own `node.json`.
 > **and** its real interface addresses) - not merely against loopback - or a lone
 > node on a real LAN will falsely warn about itself.
 
+## `device.key`
+
+This node's **Ed25519 private key** - its cryptographic trust identity
+([11](11-trust-and-balancing.md)). Stored as **raw hex** on a single line, written
+`0600`, **machine-local**, and **never gossiped** - the private key never leaves the
+box.
+
+```
+3f8a…c1  (32 raw key bytes, hex-encoded)
+```
+
+Like the node `id`, it is **minted once on first run and stable forever** after: on
+start the node reads this file, and only if it is missing or malformed does it
+generate a fresh keypair and persist it (atomically, `0600` from creation). The
+derived **public** key is what the node advertises as
+[`NodeInfo.pubkey`](04-messages.md#nodeinfo); its **fingerprint** = `sha256(public
+key)` is what the trust allowlist matches on. Writing is best-effort: if the file is
+unwritable the node still runs with the freshly-minted key **in memory** (so it can
+prove its identity for the current process, but takes a new identity on restart).
+
+A node MAY run **keyless** (the reference degrades this way when its crypto library
+is unavailable): it advertises no `pubkey`, can never be verified, and is therefore
+treated as `foreign` by any peer that has configured an allowlist.
+
+## `trusted.json`
+
+The operator's **local trusted-device allowlist** - the set of Ed25519 fingerprints
+this machine considers its own. **Machine-local** and **never gossiped**; trust is
+set by the operator, never derived from anything a peer advertises.
+
+```json
+{
+  "trusted": [
+    {"fingerprint": "9c1f…a7", "label": "mbp"}
+  ]
+}
+```
+
+Each entry is a `{fingerprint, label}` pair (`label` is a human note, optional). An
+**empty or absent** file means the trust boundary is **not configured**, so every
+verified peer is `personal` - the full-trust fallback identical to the pre-trust
+mesh ([11](11-trust-and-balancing.md)). The running node keeps the set in memory and
+edits it live through the [`trust`/`untrust`](04-messages.md#ctl) control commands,
+so a change takes effect without a restart.
+
 ## `stats.json`
 
-A third, **machine-local** file: this node's load-balancing accounting
+A **machine-local** file: this node's load-balancing accounting
 ([11](11-trust-and-balancing.md)). Unlike the other two it is **never gossiped** -
 only its derived `advertise()` view (`plan`, `usageAvg`, `quotaLeft`) rides on
 [NodeInfo.stats](04-messages.md#nodeinfo). It is written atomically like the others,
@@ -99,11 +148,12 @@ client can get it live or from disk.
   "updatedAt": "2026-07-15T04:31:02.517Z",
   "pid": 12345,
   "tcpPort": 40878,
-  "self": { …NodeInfo… },
+  "self": { …NodeInfo…, "fingerprint": "3d2a…f1" },
   "peers": [
     { …NodeInfo…, "link": "up", "addr": "192.168.1.21", "lastSeenSecsAgo": 1.2,
-      "trust": "personal", "surplus": 1.75 }
+      "verified": true, "fingerprint": "9c1f…a7", "trust": "personal", "surplus": 1.75 }
   ],
+  "trusted": [{"fingerprint": "9c1f…a7", "label": "mbp"}],
   "assignments": {
     "review":    {"duty": "review",    "assigned": ["3236…"], "shortfall": []},
     "conflicts": {"duty": "conflicts", "assigned": ["3236…"], "shortfall": []},
@@ -119,8 +169,9 @@ client can get it live or from disk.
 | `updatedAt` | string | ISO-8601 UTC write time. Advances every write; readers detecting "meaningful change" SHOULD ignore it (and `pid`, and per-peer `lastSeenSecsAgo`) so an idle mesh doesn't churn the UI. |
 | `pid` | int | the node process id - a liveness check (is a local node actually running?). |
 | `tcpPort` | int | the node's control/link port - how a local client finds the control endpoint. |
-| `self` | NodeInfo | this node's own advertisement. |
-| `peers` | array | each known peer's NodeInfo plus link decoration: `link` (`up`/`stale`/`down`), `addr` (last-seen source IP), `lastSeenSecsAgo` (float), plus this node's view of the peer: `trust` (`personal`/`foreign`, [11](11-trust-and-balancing.md)) and `surplus` (float - its spare-quota rank score). |
+| `self` | NodeInfo | this node's own advertisement, plus its own `fingerprint` (hex of its advertised `pubkey`). |
+| `peers` | array | each known peer's NodeInfo plus link decoration: `link` (`up`/`stale`/`down`), `addr` (last-seen source IP), `lastSeenSecsAgo` (float), plus **this node's local view** of the peer: `verified` (bool - whether the peer *proved possession* of its key on the link), `fingerprint` (the fingerprint it proved, or merely claims if unverified), `trust` (`personal`/`foreign`, [11](11-trust-and-balancing.md)) and `surplus` (float - its spare-quota rank score). |
+| `trusted` | array | this node's local allowlist as `[{fingerprint, label}]` - a read-only mirror of [`trusted.json`](#trustedjson). Like the per-peer trust fields it is this node's own view; `trusted.json` and `device.key` are themselves **never gossiped**. |
 | `assignments` | object | `{duty: {duty, assigned:[node_id], shortfall:[{platform, missing}]}}` - the computed placement ([06](06-coordination.md)). |
 | `overrides` | object | the effective [placement overrides](06-coordination.md#placement-overrides). |
 | `v` | int | snapshot/protocol version. |

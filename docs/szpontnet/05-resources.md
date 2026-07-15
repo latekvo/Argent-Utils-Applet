@@ -85,12 +85,15 @@ is never penalised. See [06-coordination](06-coordination.md#ranking) for the
 ranking and [11-trust-and-balancing](11-trust-and-balancing.md) for how stats drive
 dispatch.
 
-### Owner (trust domain)
+### Device identity (trust)
 
-`owner` (string, optional) - the **trust-domain id** identifying who owns the node:
-a peer sharing our owner is *personal*, a different owner is *foreign*, an empty
-owner is unset. It gates whether a received request runs. This chapter only names
-the field; [11-trust-and-balancing](11-trust-and-balancing.md) is authoritative.
+`pubkey` (string, optional) - the node's advertised **Ed25519 public key**. It is
+**not a resource** and grants no access: advertising it offers nothing and lets no
+one place work anywhere. It exists only so a peer can **prove device identity** for
+the trust boundary - a peer signs a fresh per-link challenge, and its verified key's
+**fingerprint** (`sha256(pubkey)`) is matched against a **local operator allowlist**
+to classify it *personal* vs *foreign*. This chapter only names the field;
+[11-trust-and-balancing](11-trust-and-balancing.md) is authoritative.
 
 ### Duties enabled
 

@@ -12,7 +12,8 @@ peer TCP link; **ctl** = sent on a control session (client↔node).
 | `t` | transport | direction | purpose |
 |-----|-----------|-----------|---------|
 | [`beacon`](#beacon) | UDP | broadcast | "I exist, dial me here" |
-| [`hello`](#hello) | link | both, first message | full advertisement + overrides; opens a peer link |
+| [`hello`](#hello) | link | both, first message | full advertisement + overrides + trust challenge; opens a peer link |
+| [`auth`](#auth) | link | both, reply to a hello | proof of possession: signs the peer's hello `nonce` |
 | [`node`](#node) | link | gossip | an updated advertisement |
 | [`overrides`](#overrides) | link | gossip | updated placement overrides (LWW) |
 | [`heartbeat`](#heartbeat) | link | both | liveness keep-alive |
@@ -23,6 +24,8 @@ peer TCP link; **ctl** = sent on a control session (client↔node).
 | [`status`](#status) | ctl | client→node | request the state snapshot |
 | [`state`](#state) | ctl | node→client | the state snapshot (reply to `status`) |
 | [`set-overrides`](#set-overrides) | ctl | client→node | edit a duty's placement policy |
+| [`trust`](#trust--untrust) | ctl | client→node | add a fingerprint to the local allowlist |
+| [`untrust`](#trust--untrust) | ctl | client→node | remove a fingerprint from the local allowlist |
 | [`stop`](#stop) | ctl | client→node | ask the node to shut down |
 | [`ok` / `error`](#ok--error) | ctl | node→client | generic command results |
 | [`dispatch-result`](#dispatch-result) | ctl | node→client | per-slot dispatch outcomes |
@@ -51,7 +54,7 @@ The resource advertisement for one node. Appears inside `hello` and `node`, and
   "seq": 12,
   "sees": ["bd4eaf7671d24b9792bcfd09762ac5b5"],
   "dutiesEnabled": {"audit": false},
-  "owner": "alice",
+  "pubkey": "kQ0f…base64-Ed25519-public-key…=",
   "stats": {"plan": "max-20x", "usageAvg": 3.1, "quotaLeft": 20.0},
   "v": 1
 }
@@ -69,11 +72,11 @@ The resource advertisement for one node. Appears inside `hello` and `node`, and
 | `seq` | int | no (`0`) | per-incarnation update counter. |
 | `sees` | array<string> | no (`[]`) | ids of peers this node currently holds a link to (for topology display + partition awareness). |
 | `dutiesEnabled` | object<string,bool> | no (`{}`) | per-duty opt-out; a duty absent from the map is **enabled** by default. |
-| `owner` | string | no (`""`) | trust-domain id - who owns this node. A peer sharing our owner is *personal*, a different owner is *foreign*; empty = unset. See [11-trust-and-balancing](11-trust-and-balancing.md). |
+| `pubkey` | string | no | the node's advertised base64 Ed25519 public key. Advertising it grants **nothing** - a peer must prove possession by signing the [`hello`](#hello)/[`auth`](#auth) challenge before it is believed to hold this key. Trust then keys on its fingerprint `sha256(pubkey)` against a local allowlist. See [11-trust-and-balancing](11-trust-and-balancing.md). |
 | `stats` | object | no (`{}`) | load-balancing accounting: `{"plan", "usageAvg", "quotaLeft"}` in plan-relative units. See [05-resources](05-resources.md#per-node-stats-account-aware-load-balancing) and [11](11-trust-and-balancing.md). |
 | `v` | int | no (`1`) | protocol version of this advertisement. |
 
-`owner` and `stats` are **additive and optional**: both are **omitted from the
+`pubkey` and `stats` are **additive and optional**: both are **omitted from the
 wire form when empty**, so a v1 advertisement that sets neither is byte-identical
 to before. The `stats` sub-keys are `plan` (string, account-type id, e.g.
 `max-20x`), `usageAvg` (float, 21-day rolling average of usage per day), and
@@ -148,14 +151,16 @@ advertisement travels in the [`hello`](#hello), keeping beacons tiny.
 
 First message on a peer link, sent by **both** sides (the dialer sends it on
 connect; the accepter sends it in reply). Carries the sender's full advertisement,
-its current placement overrides, and - if a [join fence](03-transport.md#the-join-fence)
-is configured - the shared secret.
+its current placement overrides, a fresh per-connection trust challenge (`nonce`),
+and - if a [join fence](03-transport.md#the-join-fence) is configured - the shared
+secret.
 
 ```json
 {"t": "hello",
  "node": { …NodeInfo… },
  "overrides": { …PlacementOverrides, see 06… },
  "secret": "optional-shared-secret",
+ "nonce": "a1b2c3d4e5f6…",
  "v": 1}
 ```
 
@@ -164,12 +169,36 @@ is configured - the shared secret.
 | `node` | NodeInfo | **yes** | the sender's advertisement. |
 | `overrides` | object | no (`{}`) | the sender's placement overrides ([06](06-coordination.md#placement-overrides)); merged LWW. |
 | `secret` | string | conditional | present iff a join fence is configured; MUST match. |
+| `nonce` | string | no | a fresh per-connection trust challenge (hex). The peer must return an [`auth`](#auth) signing it to prove possession of the private key for its advertised `pubkey`. |
 
 On receiving a valid `hello` a node: validates the secret; records/updates the
 peer's NodeInfo (by freshness); binds this link's writer to that peer; merges the
-`overrides`; and recomputes assignments. See
-[03-transport](03-transport.md#the-join-fence) for the authentication ordering an
-unauthenticated link MUST enforce before accepting anything other than a hello.
+`overrides`; answers the `nonce` with an [`auth`](#auth); and recomputes
+assignments. See [03-transport](03-transport.md#the-join-fence) for the
+authentication ordering an unauthenticated link MUST enforce before accepting
+anything other than a hello.
+
+### `auth`
+
+Proof of possession, sent in reply to the `nonce` in a peer's [`hello`](#hello). It
+carries a signature over the *peer's* hello `nonce`, proving the sender holds the
+private key for the `pubkey` it advertised.
+
+```json
+{"t": "auth", "sig": "…base64-Ed25519-signature…", "v": 1}
+```
+
+| Field | Type | Req? | Meaning |
+|-------|------|------|---------|
+| `sig` | string | **yes** | base64 Ed25519 signature over the peer's hello `nonce`. |
+
+The handshake is **symmetric**: both link directions send a `hello` (each with its
+own `nonce`) and answer the other's challenge with an `auth`. A receiver verifies
+the `sig` against the nonce **it** issued and the peer's advertised `pubkey`; on
+success it records the peer's **verified fingerprint** (`sha256(pubkey)` - what
+trust keys on). A bad or absent signature leaves the peer **unverified**, hence
+*foreign* under any configured allowlist. See
+[11-trust-and-balancing](11-trust-and-balancing.md).
 
 ### `node`
 
@@ -341,12 +370,21 @@ topology as this node sees it.
 ```json
 {"t": "state", "state": {
    "tcpPort": 40878,
-   "self": { …NodeInfo… },
-   "peers": [ { …NodeInfo…, "link": "up", "addr": "192.168.1.21", "lastSeenSecsAgo": 1.2 } ],
+   "self": { …NodeInfo…, "fingerprint": "…64-hex…" },
+   "peers": [ { …NodeInfo…, "link": "up", "addr": "192.168.1.21", "lastSeenSecsAgo": 1.2,
+               "verified": true, "fingerprint": "…64-hex…", "trust": "personal" } ],
+   "trusted": [ {"fingerprint": "…64-hex…", "label": "mbp"} ],
    "assignments": {"review": {"duty": "review", "assigned": ["…"], "shortfall": []}},
    "overrides": {"rev": 0, "updatedBy": "", "duties": {}}
 }, "v": 1}
 ```
+
+Alongside the existing link/addr/surplus decoration, the snapshot carries the
+trust view: `self` gains its own `fingerprint`; each peer entry gains `verified`
+(bool - whether the peer proved a key on this link), `fingerprint` (its **verified**
+fingerprint, or the fingerprint of its advertised `pubkey` when not yet verified),
+and `trust` (`personal`/`foreign` against the local allowlist); and a top-level
+`trusted` array lists the local allowlist as `{fingerprint, label}` entries.
 
 See [08-state](08-state.md#the-statejson-snapshot) for the full snapshot schema.
 
@@ -362,6 +400,26 @@ mesh-wide. The node bumps the last-writer-wins `rev`, applies it, and gossips it
 
 Reply: [`ok`](#ok--error), or [`error`](#ok--error) if `duty` is unknown or
 `placement` is malformed.
+
+### `trust` / `untrust`
+
+Edit this node's **local** trust allowlist. `trust` adds a fingerprint (with an
+optional operator label); `untrust` removes one.
+
+```json
+{"t": "trust", "fingerprint": "a1b2…64-hex…", "label": "mbp", "v": 1}
+{"t": "untrust", "fingerprint": "a1b2…64-hex…", "v": 1}
+```
+
+| Field | Type | Req? | Meaning |
+|-------|------|------|---------|
+| `fingerprint` | string | **yes** | the device fingerprint (`sha256(pubkey)`, 64 hex) to add or remove. |
+| `label` | string | no | human label stored alongside a trusted fingerprint (`trust` only). |
+
+Both reply [`ok`](#ok--error) (or [`error`](#ok--error) when `fingerprint` is
+missing). This edits **machine-local** state (`~/.argent/mesh/trusted.json`) and is
+**never gossiped** - trust is each operator's own call. See
+[11-trust-and-balancing](11-trust-and-balancing.md).
 
 ### `stop`
 

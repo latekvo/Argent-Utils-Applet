@@ -127,7 +127,9 @@ Before running, the receiver applies its own **admission** check - its own call,
 consensus needed. It replies [`declined`](04-messages.md#job-status) (a `job-status`
 status) rather than running when any of:
 
-- the requester is **foreign** (a different [owner](11-trust-and-balancing.md)). The
+- the requester is a **foreign** device - one whose proven key isn't in this node's
+  local [trust allowlist](11-trust-and-balancing.md#trust-is-never-derived-from-an-advertisement)
+  (classified from the *verified* link, never from the job's `requestedBy`). The
   zero-trust path - run the compute here but route any social action back through a
   *personal* node - is not built yet, so a stranger's request is declined rather than
   acted on on their behalf;

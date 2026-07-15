@@ -46,12 +46,13 @@ the chosen machine(s), failing over if the first pick can't take it.
 3. **Resource-advertisement first.** A node's whole purpose on the wire is to say
    *"here is what I can do"*; the protocol is the machinery that turns those
    advertisements into placement decisions.
-4. **Trust scoped to your own fleet.** A node runs a request from one of *your
-   own* devices (a **personal** peer) directly, as if you'd triggered it locally;
-   a request from **someone else's** device (a **foreign** peer) is declined until
-   the zero-trust foreign path exists. With no owners configured every peer is
-   personal, so this reduces to full altruism. See
-   [11-trust-and-balancing](11-trust-and-balancing.md).
+4. **Trust scoped to devices you have explicitly trusted.** A node runs a request
+   from a **personal** peer (a device whose key you've added to a local allowlist)
+   directly, as if you'd triggered it locally; a request from any other
+   (**foreign**) device is declined until the zero-trust foreign path exists. Trust
+   is proven by a device keypair, never inferred from a spoofable advertised field.
+   With no allowlist configured every peer is personal, so this reduces to full
+   altruism. See [11-trust-and-balancing](11-trust-and-balancing.md).
 5. **Extensible without breaking changes.** The trust model, the resource
    vocabulary, the duty catalog and the placement strategies are all designed to
    grow - in particular so that **limits on altruism** (quotas, caps, priorities,
@@ -64,26 +65,30 @@ the chosen machine(s), failing over if the first pick can't take it.
 
 ## The trust model: personal vs foreign
 
-SzpontNet started as **full altruism** - a cooperative, trusted LAN where every
-node accepts any job. That is still the behavior when no node sets an **owner**.
-On top of it sits a two-level trust model
-([11-trust-and-balancing](11-trust-and-balancing.md)):
+A **personal** SzpontRequest runs *directly* on the receiver, spawning work that
+can take social actions under your identity (open a PR, comment on GitHub). So
+trust must be unforgeable. SzpontNet never derives it from an advertised field -
+**assume every advertisement is spoofed** - but from a proven device key plus a
+local allowlist ([11-trust-and-balancing](11-trust-and-balancing.md)):
 
-- **personal** - a peer that shares your `owner` (one of your own devices). Its
-  **SzpontRequests** (the name for a dispatched unit of work) run **directly**, as
-  if you'd triggered the work from that machine's own panel. Within your fleet
-  this is exactly the original full altruism.
-- **foreign** - a peer with a different owner (someone else's device). Its
-  requests are **declined** in v1. The future zero-trust design lets a foreign
-  node run the *compute* but routes any **social action** (submitting a PR,
-  commenting on GitHub) back through one of your personal nodes before it happens;
-  until that lands, declining is the safe default.
+- Each node has an **Ed25519 device keypair**; its public key is advertised, but
+  advertising it grants nothing. On each link the peer must **sign a fresh
+  challenge**, proving it holds the private key for the fingerprint it claims.
+- You **manually trust** a device by adding its fingerprint to a **local
+  allowlist** (never gossiped). A peer whose *verified* fingerprint is on your
+  list is **personal**; anyone else is **foreign**.
 
-The classification is opt-in and safe by default: **if either side hasn't set an
-owner, the peer is personal**, so an owner-less mesh behaves precisely as the
-trusting core did. The join fence ([03-transport](03-transport.md#the-join-fence))
-still gates *who may join*; trust is the finer, per-owner question of *whose
-requests a node will act on*.
+A personal peer's requests run directly, as if you'd pressed the button on that
+machine yourself. A **foreign** peer's requests are **declined** in v1; the future
+zero-trust design lets a foreign node run the *compute* but routes any social
+action back through one of your personal nodes before it happens.
+
+The boundary is opt-in and safe by default: **an empty allowlist means full
+trust** (every peer personal), so a fresh mesh behaves precisely as the trusting
+core did - until you trust a first device. The join fence
+([03-transport](03-transport.md#the-join-fence)) still gates *who may join*; trust
+is the finer question of *whose requests a node will act on*, and unlike the shared
+join secret it distinguishes individual devices.
 
 **Load balancing and refusals.** Beyond eligibility, a dispatcher picks a target
 by **surplus** - the node with the most spare quota, account-type aware (Max 5x vs

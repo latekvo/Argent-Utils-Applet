@@ -56,6 +56,14 @@ implements the [trust/refusal layer](11-trust-and-balancing.md)). A Dispatcher
 **MUST** treat any non-`spawned` status - including a `declined` it doesn't
 understand - as a failover trigger, never an error.
 
+An Executor that implements the trust layer additionally **MUST**: verify a peer's
+**proof of possession** - an [`auth`](04-messages.md#auth) signature over the
+executor's own fresh hello nonce, validated against the peer's advertised `pubkey` -
+before treating that peer as `personal`; **classify the requester from that verified
+link identity**, never from the job's `requestedBy` (which is spoofable); and treat
+an **empty allowlist as full trust** (every verified peer `personal`). See
+[11-trust-and-balancing](11-trust-and-balancing.md) for the full conformance list.
+
 A **Dispatcher** additionally **MUST** route a job via
 [`slot_candidates`](07-dispatch.md#slots) with per-slot failover, one node per slot,
 honoring the `dispatchAckTimeoutSecs` wait for remote replies.

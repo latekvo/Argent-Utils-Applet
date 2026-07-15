@@ -56,12 +56,18 @@ Tier is clamped to `[min, max]` on apply ([04](04-messages.md#set-attr)).
 
 | id | notes |
 |----|-------|
-| `personal` | one of my own devices - same `owner`; a received SzpontRequest runs directly. |
-| `foreign` | someone else's device - different `owner`; its requests are declined in v1. |
+| `personal` | the peer's **verified** fingerprint is in my local allowlist; a received SzpontRequest runs directly. |
+| `foreign` | any other device - unlisted, or it proved no key; its requests are declined in v1. |
 
-`trust.default` = `personal` - an unknown/absent `owner` is treated as personal, so
-a v1 mesh with no owners set stays fully trusting. See
+`trust.default` = `personal` - the classification when the local allowlist is
+**empty** (the trust boundary isn't configured), so a v1 mesh with no trusted
+devices set stays fully trusting until the operator trusts a first fingerprint. See
 [11-trust-and-balancing](11-trust-and-balancing.md).
+
+**Trust identity / files.** Each device holds an Ed25519 keypair persisted at
+`~/.argent/mesh/device.key` (`0600`, machine-local, never gossiped); a fingerprint
+is `sha256(public key)` as 64 hex chars. The trusted allowlist lives at
+`~/.argent/mesh/trusted.json` (operator-managed, machine-local, never gossiped).
 
 ## Accounts (v1 vocabulary)
 

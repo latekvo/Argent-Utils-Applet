@@ -3,9 +3,9 @@
 Chapters 01-10 specify the SzpontNet **core**: discovery, links, gossip,
 leaderless assignment, dispatch. This chapter specifies the layer built on top of
 it - **who a node trusts** and **how a dispatcher chooses where work goes**. Both
-are **additive** (a node that advertises no `owner` and no `stats` behaves exactly
-as the core describes), so a v1 core node and a node implementing this chapter
-interoperate on the same mesh.
+are **additive** (a node that advertises no `pubkey` and no `stats`, and configures
+no allowlist, behaves exactly as the core describes), so a v1 core node and a node
+implementing this chapter interoperate on the same mesh.
 
 A dispatched unit of work is called a **SzpontRequest** throughout this chapter;
 on the wire it is still a [`dispatch`](04-messages.md#dispatch) message carrying a
@@ -14,39 +14,60 @@ whoever's best placed."
 
 ## Two trust levels
 
-Every node belongs to an **owner** - a stable id for whoever runs it (a person, a
-fleet). It rides on the advertisement as the optional
-[`owner`](04-messages.md#nodeinfo) field. From any node's point of view, a peer is
-one of two trust levels:
+Trust exists because a *personal* SzpontRequest runs **directly** on the receiver -
+staging a prompt and spawning work that can take **social actions under your
+identity** (submitting a PR, commenting on GitHub via your CLI). Granting that to
+the wrong peer is a privilege-escalation bug. From any node's point of view a peer
+is one of two levels:
 
 | Level | Meaning | What happens to its SzpontRequests |
 |-------|---------|-----------------------------------|
-| **personal** | one of *my own* devices (same owner) | run **directly**, as if I had triggered the work from my own panel |
-| **foreign** | someone *else's* device (a different owner) | **declined** in v1 (see [the foreign path](#the-foreign-path-future-zero-trust)) |
+| **personal** | a device *you have explicitly trusted* | run **directly**, as if you had triggered the work from your own panel |
+| **foreign** | any other device | **declined** in v1 (see [the foreign path](#the-foreign-path-future-zero-trust)) |
 
-### Classifying a peer
+### Trust is never derived from an advertisement
 
-Trust is decided by the **executor** (the node that receives a SzpontRequest),
-comparing the requester's advertised `owner` to its own:
+**Assume every advertised field is spoofed.** A node's `id`, `name`, and any other
+self-reported value are display-only and **grant zero privilege** - a stranger can
+beacon any of them. Trust therefore rests on two things a stranger cannot forge:
+
+1. **A proven device key.** Each node has an Ed25519 keypair
+   ([08](08-state.md#devicekey)); its **fingerprint** is `sha256(public key)`. The
+   public key is advertised (as [`pubkey`](04-messages.md#nodeinfo)), but
+   *advertising it grants nothing*. On every link the peer must **prove possession**
+   of the matching private key: our [`hello`](04-messages.md#hello) carries a fresh
+   random `nonce`, and the peer must return an [`auth`](04-messages.md#auth)
+   message signing that nonce. Only a peer holding the private key can produce a
+   valid signature, and the nonce is per-connection so a captured signature can't
+   be replayed. A peer that copies someone else's advertised `pubkey` cannot sign
+   our challenge for it, so it is never *verified* as that identity.
+2. **A local allowlist.** Trust is **set manually by the operator and stored only
+   on this machine** ([`trusted.json`](08-state.md#trustedjson), never gossiped): a
+   set of fingerprints marked as "my devices."
+
+The executor classifies the requester from the **verified fingerprint of the link
+the request arrived on** - never from the job's self-reported `requestedBy`:
 
 ```
-function trust_of(peer_owner, my_owner) -> "personal" | "foreign":
-    if my_owner == "" or peer_owner == "":   # either side unset - can't decide
-        return trust.default                 # "personal"
-    return "personal" if peer_owner == my_owner else "foreign"
+function classify(verified_fingerprint, allowlist) -> "personal" | "foreign":
+    if allowlist is empty:                          # boundary not configured
+        return "personal"                           # full trust (v1-compatible)
+    if verified_fingerprint in allowlist:
+        return "personal"
+    return "foreign"                                # unlisted, or never verified
 ```
 
-The key rule: **if either owner is unset, the peer is personal.** This is the
-v1-compatible default (`trust.default = "personal"`). A mesh where nobody has set
-an owner is therefore fully trusting - identical to the pre-trust core. Foreign
-only ever arises when *both* the requester and the executor have set owners and
-they differ. This makes the whole feature opt-in: you get zero-trust behavior
-only once you actually label your devices.
+**Empty allowlist = full trust**, so a fresh mesh behaves exactly like the
+pre-trust core. The moment you trust even one device the boundary switches on and
+every unlisted (or unverified) peer becomes foreign. Enabling zero-trust is thus a
+deliberate act: `--trust <fingerprint>` (get a peer's fingerprint from its
+`--fingerprint`, shown in `--status`, or its `state.json`).
 
-An `owner` is set like any other attribute - a [`set-attr`](04-messages.md#set-attr)
-(`owner=my-fleet`), the `ARGENT_MESH_OWNER` environment variable (so a fleet can
-stamp the same owner on every machine without editing each `node.json`), or
-persisted in [`node.json`](08-state.md#nodejson).
+> Because verification is symmetric and per-link, an unverified peer (an old core
+> node with no key, or a lib-less keyless node) has **no** verified fingerprint, so
+> `classify` returns foreign under any non-empty allowlist. That is the correct,
+> conservative outcome: you never grant personal access to something you couldn't
+> authenticate.
 
 ### The personal path (v1)
 
@@ -54,14 +75,14 @@ When a personal peer sends a SzpontRequest, the receiving node **runs it
 directly** - exactly the [execution](07-dispatch.md#execution) the core describes:
 stage the prompt, spawn the work, reply `spawned`. There is no extra hop. A
 review SzpontRequest from your laptop runs on your desktop just as if you had
-pressed the review button there yourself. This is the full-trust altruism of the
-core, now scoped to "my own fleet."
+pressed the review button there yourself - full-trust altruism, scoped to the
+devices you have explicitly trusted.
 
 ### The foreign path (future zero-trust)
 
 The foreign path is **deliberately unimplemented in v1.** A node that receives a
-SzpontRequest from a foreign owner **declines** it (a [`declined`](#refusals-are-first-class)
-`job-status`, reason `"foreign requester (zero-trust path not implemented)"`).
+SzpontRequest from a foreign device **declines** it (a [`declined`](#refusals-are-first-class)
+`job-status`, reason `"foreign device (zero-trust path not implemented)"`).
 
 The intended future design (reserved, not yet normative): a foreign node MAY run
 the *compute* half of a SzpontRequest, but any **social action** - submitting a
@@ -177,20 +198,28 @@ failover (the dispatcher chose that node on purpose).
 
 An implementation of this chapter:
 
-- **MUST** default an unset-owner comparison to `personal` (rule: either side
-  unset ⇒ personal), so an owner-less mesh stays fully trusting and interoperates
-  with core-only nodes.
-- **MUST** omit `owner` and `stats` from an advertisement when they are empty, so
+- **MUST NOT** derive trust from any advertised field. Trust rests only on a
+  verified key fingerprint against a local allowlist.
+- **MUST** treat an **empty** allowlist as full trust (`personal` for all), so a
+  fresh mesh interoperates with core-only nodes; and treat a peer that has **not**
+  proved a key as having no fingerprint, hence `foreign` under any non-empty
+  allowlist.
+- **MUST** verify proof of possession before treating a peer as `personal`: the
+  peer's [`auth`](04-messages.md#auth) signature over *our* fresh per-connection
+  `nonce` must validate against the `pubkey` it advertised. It **MUST** classify
+  the requester from that verified link identity, never from `requestedBy`.
+- **MUST** omit `pubkey` and `stats` from an advertisement when they are empty, so
   a node that uses neither is byte-compatible with a core v1 advertisement.
 - **MUST** treat a `declined` `job-status` as a non-`spawned` outcome (fail the
   slot over), exactly like `failed`, whether or not it understands the reason.
-- **SHOULD** decline a foreign requester's SzpontRequest until the zero-trust
-  foreign path is implemented, rather than running it.
+- **SHOULD** decline a foreign device's SzpontRequest until the zero-trust foreign
+  path is implemented, rather than running it.
 - **SHOULD** rank dispatch targets `surplus-first` and MUST fall back to
   weakest-first ordering when surpluses tie (including the all-neutral case).
 - **MAY** advertise `stats`; a node that doesn't is treated as surplus 0 and ranks
   by the core strategies, never as an error.
 
 Everything here rides `v: 1` and the [compatibility contract](09-extensibility.md#the-compatibility-contract):
-new optional fields, a new enum value (`declined`), a new strategy id
-(`surplus-first`), all safe to add without a version bump.
+new optional fields (`pubkey`, `stats`), new message types (`auth`), a new enum
+value (`declined`), a new strategy id (`surplus-first`), all safe to add without a
+version bump.

@@ -171,14 +171,21 @@ caps. No flag day, no `v` bump required for the common cases - exactly the
 - **Cross-subnet / WAN operation.** v1 is single-LAN (link-local multicast, subnet
   broadcast). Federation across subnets is future work.
 - **Foreign zero-trust execution.** The two-level trust model (`personal`/`foreign`,
-  keyed on a node's [owner](11-trust-and-balancing.md)) **has landed**, and a foreign
-  requester is [declined](07-dispatch.md#refusal-policy). The full zero-trust path -
-  *running* foreign compute while routing any social action back through a personal
-  node - remains future work; today a foreign request is refused outright rather than
+  keyed on a peer's **verified device fingerprint** against a local allowlist
+  ([11](11-trust-and-balancing.md))) **has landed**, and a foreign requester is
+  [declined](07-dispatch.md#refusal-policy). The full zero-trust path - *running*
+  foreign compute while routing any social action back through a personal node -
+  remains future work; today a foreign request is refused outright rather than
   sandboxed.
-- **Transport security / authenticated identity.** The [join fence](03-transport.md#the-join-fence)
-  is a plaintext gate, not authentication. Mutual TLS or signed advertisements are
-  a future, capability-negotiated extension.
+- **Transport encryption / confidentiality.** **Authenticated device identity has
+  landed**: each node holds a per-device [Ed25519 key](08-state.md#devicekey),
+  proves possession on every link (a signature over the peer's fresh hello nonce),
+  and trust is keyed on the resulting verified fingerprint - so identity
+  authentication for the trust boundary is now implemented. What remains future work
+  is **encrypting the link traffic** itself: mutual TLS or an encrypted transport for
+  confidentiality/integrity of the bytes on the wire. The
+  [join fence](03-transport.md#the-join-fence) is still a **plaintext gate** (a
+  shared-secret admission check, not a confidential channel).
 - **Exactly-once dispatch / completion tracking.** v1 tracks hand-off, not
   completion, and does not deduplicate ([07](07-dispatch.md#idempotency--duplicates)).
 - **IPv6.** v1 discovery and links are IPv4. IPv6 is additive future work.
