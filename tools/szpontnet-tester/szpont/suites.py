@@ -1368,6 +1368,238 @@ def case_k_override_authentic(rep: Reporter, ctx: Context) -> None:
                   f"review={_assignments(scn.candidate.snapshot()).get('review')} (expected [B])")
 
 
+# MARK: - L. Work-claims (ch 12 — leaderless origination leases)
+#
+# A work-claim is a gossiped, self-signed lease that deduplicates ORIGINATION of
+# externally-triggered work. The owner of a workKey is the lowest node id among
+# ACTIVE claims whose claimant is live AND trusted-personal (self always). These
+# cases drive the candidate black-box: a probe mints a claim on its own behalf and
+# a control-session `dispatch` carrying that `workKey` is either SUPPRESSED (a
+# better peer owns it) or proceeds. The probe ids are chosen so the probe sorts
+# BELOW the candidate when its claim must WIN (suppress the candidate).
+#
+# Setup uses candidate_id=ID_B so a probe at ID_A ("a"*32 < "b"*32) out-ranks the
+# candidate: its active claim, once adopted, makes it the lowest-id owner and the
+# candidate must stand down. That probe DIALS the candidate (smaller-id-dials), so
+# it links and is verified exactly like a category-I peer.
+
+
+def _claim_owner(snap: dict | None, work_key: str):
+    """The owner the candidate reports for ``work_key`` in its snapshot (the
+    ``claims`` map: owned work_key → owner id), or None if unowned/absent."""
+    return (snap or {}).get("claims", {}).get(work_key)
+
+
+def _dispatch_with_workkey(scn, work_key: str, duty: str = "review",
+                           prompt: str = "wc", timeout: float = 12.0):
+    """Open a control session and dispatch ``duty`` carrying ``workKey`` (opting
+    into origination dedup). Returns the dispatch-result dict, or None."""
+    try:
+        sess = scn.candidate.open_ctl()
+    except OSError:
+        return None
+    try:
+        msg = dict(codec.dispatch_route(duty, prompt))
+        msg["workKey"] = work_key
+        return sess.command(msg, timeout=timeout)
+    finally:
+        try:
+            sess.close()
+        except Exception:
+            pass
+
+
+def _suppressed_slot(res: dict | None):
+    """The single ``claim``/``suppressed`` slot from a dispatch-result, if present."""
+    if not res or res.get("t") != "dispatch-result":
+        return None
+    for r in res.get("results", []):
+        if r.get("slot") == "claim" or r.get("status") == "suppressed":
+            return r
+    return None
+
+
+def _wait_linked_verified(rep: Reporter, scn, peer, timeout: float = 10.0) -> bool:
+    """Wait for ``peer`` to link and be verified-personal by the candidate (so its
+    claim can be authoritative). Records a skip and returns False on timeout."""
+    if not wait_until(lambda: peer.linked, timeout):
+        rep.skip_case("probe never linked")
+        return False
+    ok = wait_until(
+        lambda: _peer_snap(scn.candidate.snapshot(), peer.info.id).get("trust") == "personal",
+        timeout)
+    if not ok:
+        rep.skip_case("candidate never trusted the probe as personal — not work-claim-capable")
+        return False
+    return True
+
+
+def case_l_suppression(rep: Reporter, ctx: Context) -> None:
+    rep.begin_case("L1", "A lower-id personal peer's active claim SUPPRESSES the candidate's dispatch (12)")
+    # Candidate is ID_B; probe is ID_A (< candidate) so its claim wins ownership.
+    scn = Scenario(ctx.node_cmd, ctx.model, candidate_id=ID_B, platform="linux", tier=4,
+                   loopback=ctx.loopback)
+    scn.add_peer(id=ID_A, name="claimer", platform="macos", tier=1, trust_peer=True)
+    with scn:
+        if not _need_port(rep, scn):
+            return
+        if scn.candidate.ctl_status() is None:
+            rep.skip_case("candidate serves no control session — not a Dispatcher")
+            return
+        peer = scn.mesh.peers[0]
+        if not _wait_linked_verified(rep, scn, peer):
+            return
+        wk = "review:github.com/acme/app#1@aaaa"
+        # The probe mints and gossips a signed ACTIVE claim on its own behalf.
+        peer.send_claim(wk, state="active", seq=0)
+        # Give it time to propagate + be adopted: the candidate must record the
+        # probe as the owner of WK in its snapshot before we dispatch.
+        owned = wait_until(lambda: _claim_owner(scn.candidate.snapshot(), wk) == ID_A, 8.0)
+        rep.check("the candidate adopts the peer's claim and reports it as the owner",
+                  bool(owned), "MUST", "12-work-claims#ownership",
+                  f"claims={(scn.candidate.snapshot() or {}).get('claims')}")
+        res = _dispatch_with_workkey(scn, wk)
+        slot = _suppressed_slot(res)
+        rep.check("a dispatch carrying that workKey is SUPPRESSED (a better peer owns it)",
+                  slot is not None and slot.get("status") == "suppressed", "MUST",
+                  "12-work-claims#integration-with-dispatch",
+                  f"results={(res or {}).get('results')}")
+        rep.check("the suppressed slot names the owning peer as the current owner",
+                  slot is not None and slot.get("node") == ID_A, "MUST",
+                  "12-work-claims#integration-with-dispatch",
+                  f"owner in slot={slot.get('node') if slot else None} (expected {ID_A[:8]})")
+        # The probe must NOT have received a job — suppression means no origination.
+        rep.check("no job was dispatched to the peer (suppressed, not routed)",
+                  not any(j.prompt == "wc" for j in peer.jobs), "MUST",
+                  "12-work-claims#integration-with-dispatch",
+                  f"peer jobs={[j.duty for j in peer.jobs]}")
+
+
+def case_l_forgery_dropped(rep: Reporter, ctx: Context) -> None:
+    rep.begin_case("L2", "A work-claim with an invalid sig is DROPPED, so it never suppresses (12)")
+    scn = Scenario(ctx.node_cmd, ctx.model, candidate_id=ID_B, platform="linux", tier=4,
+                   loopback=ctx.loopback)
+    scn.add_peer(id=ID_A, name="forger", platform="macos", tier=1, trust_peer=True)
+    with scn:
+        if not _need_port(rep, scn):
+            return
+        if scn.candidate.ctl_status() is None:
+            rep.skip_case("candidate serves no control session — not a Dispatcher")
+            return
+        peer = scn.mesh.peers[0]
+        if not _wait_linked_verified(rep, scn, peer):
+            return
+        if peer.key is None:
+            rep.skip_case("probe is keyless (no cryptography) — cannot forge a keyed claim")
+            return
+        wk = "review:github.com/acme/app#2@bbbb"
+        # Sign a valid claim, then TAMPER a covered field after signing so the
+        # stored sig no longer verifies — a keyed claim with a bad sig MUST be
+        # dropped (never stored, never authoritative).
+        claim = peer.sign_claim(wk, state="active", seq=0)
+        claim["seq"] = claim.get("seq", 0) + 7  # mutate after signing → stale sig
+        peer.send(codec.work_claim(claim))
+        time.sleep(2.0)
+        rep.check("the tampered (bad-sig) claim is dropped — WK stays unowned",
+                  _claim_owner(scn.candidate.snapshot(), wk) is None, "MUST",
+                  "12-work-claims#authentication",
+                  f"claims={(scn.candidate.snapshot() or {}).get('claims')}")
+        # With the forgery dropped, a dispatch of WK must PROCEED (not suppressed).
+        res = _dispatch_with_workkey(scn, wk)
+        rep.check("a dispatch of that workKey is NOT suppressed (the forgery had no effect)",
+                  _suppressed_slot(res) is None and res is not None
+                  and res.get("t") == "dispatch-result", "MUST",
+                  "12-work-claims#authentication",
+                  f"results={(res or {}).get('results')}")
+
+
+def case_l_keyless_non_authoritative(rep: Reporter, ctx: Context) -> None:
+    rep.begin_case("L3", "A keyless peer's active claim is NON-authoritative — never suppresses (12)")
+    scn = Scenario(ctx.node_cmd, ctx.model, candidate_id=ID_B, platform="linux", tier=4,
+                   loopback=ctx.loopback)
+    # A keyless probe (trust_peer=False): its claim carries no key to bind to, so
+    # per the ownership binding (12 §Ownership) it can never OWN the key in ANY
+    # trust configuration — not even the empty-allowlist full-trust default, since a
+    # keyless claim is not signed by the peer it names. This case additionally
+    # configures the allowlist (trusting the candidate's own fingerprint, mirroring
+    # I2) so the keyless peer is *also* classified foreign — a strictly stronger
+    # setup that a conformant node must still refuse to let suppress work.
+    scn.add_peer(id=ID_A, name="keyless", platform="macos", tier=1, trust_peer=False)
+    with scn:
+        if not _need_port(rep, scn):
+            return
+        snap = scn.candidate.ctl_status()
+        if snap is None or not snap.get("self", {}).get("fingerprint"):
+            rep.skip_case("candidate serves no control session / no self fingerprint — not trust-capable")
+            return
+        peer = scn.mesh.peers[0]
+        if not wait_until(lambda: peer.linked, 10.0):
+            rep.skip_case("keyless probe never linked")
+            return
+        # Enable the allowlist by trusting ONLY the candidate itself, so the
+        # unverified keyless peer classifies as foreign (mirrors I2).
+        try:
+            sess = scn.candidate.open_ctl()
+            sess.command(codec.trust(snap["self"]["fingerprint"], "self"))
+            sess.close()
+        except OSError:
+            rep.skip_case("could not drive trust control command")
+            return
+        if not wait_until(
+                lambda: _peer_snap(scn.candidate.snapshot(), ID_A).get("trust") == "foreign", 4.0):
+            rep.skip_case("keyless peer never classified foreign (allowlist not honored)")
+            return
+        wk = "review:github.com/acme/app#3@cccc"
+        peer.send_claim(wk, state="active", seq=0)  # keyless → unsigned claim
+        time.sleep(2.0)
+        rep.check("a keyless claimant never owns the key (non-authoritative)",
+                  _claim_owner(scn.candidate.snapshot(), wk) is None, "MUST",
+                  "12-work-claims#ownership",
+                  f"claims={(scn.candidate.snapshot() or {}).get('claims')}")
+        res = _dispatch_with_workkey(scn, wk)
+        rep.check("a dispatch of that workKey is NOT suppressed by a keyless claim",
+                  _suppressed_slot(res) is None and res is not None
+                  and res.get("t") == "dispatch-result", "MUST",
+                  "12-work-claims#ownership",
+                  f"results={(res or {}).get('results')}")
+
+
+def case_l_relay_verbatim(rep: Reporter, ctx: Context) -> None:
+    rep.begin_case("L4", "An adopted claim is re-broadcast VERBATIM to the other linked peer (12)")
+    scn = Scenario(ctx.node_cmd, ctx.model, candidate_id=ID_C, platform="linux", tier=4,
+                   loopback=ctx.loopback)
+    # P mints the claim (id < candidate so it is adopted-and-authoritative); Q is a
+    # second linked peer that must receive the relayed claim verbatim. Both sort
+    # below ID_C so both dial and link.
+    scn.add_peer(id=ID_A, name="claimer-P", platform="macos", tier=1, trust_peer=True)
+    scn.add_peer(id=ID_B, name="observer-Q", platform="macos", tier=1, trust_peer=True)
+    with scn:
+        if not _need_port(rep, scn):
+            return
+        peer_p, peer_q = scn.mesh.peers[0], scn.mesh.peers[1]
+        if not wait_until(lambda: peer_p.linked and peer_q.linked, 12.0):
+            rep.skip_case("fleet never fully linked")
+            return
+        wk = "review:github.com/acme/app#4@dddd"
+        sent = peer_p.sign_claim(wk, state="active", seq=0)
+        if peer_p.key is None:
+            rep.skip_case("probes are keyless (no cryptography) — no signature to relay")
+            return
+        peer_p.send(codec.work_claim(sent))
+        # Q must receive a work-claim for WK, relayed verbatim (byte-stable claim).
+        got = wait_until(lambda: next(
+            (m for m in peer_q.messages("work-claim")
+             if (m.get("claim") or {}).get("workKey") == wk), None), 8.0)
+        rep.check("the second peer receives the relayed work-claim for the key",
+                  got is not None, "MUST", "12-work-claims#the-claim-book",
+                  "an adopted claim MUST be re-propagated to the other links")
+        rep.check("the relayed claim is byte-identical to the one P signed (verbatim relay)",
+                  got is not None and got.get("claim") == sent, "MUST",
+                  "12-work-claims#the-claim-book",
+                  "re-serialization would break the claimant's signature; the relay "
+                  "MUST forward the exact received claim dict")
+
+
 # MARK: - registry
 
 
@@ -1387,6 +1619,8 @@ SUITES = {
     "J": [case_j_server_no_dispatch, case_j_api_key_dispatch, case_j_api_key_ctl],
     "K": [case_k_unsigned_keyed_dropped, case_k_tampered_dropped, case_k_wrong_key_dropped,
           case_k_advert_hijack_blocked, case_k_override_authentic],
+    "L": [case_l_suppression, case_l_forgery_dropped, case_l_keyless_non_authoritative,
+          case_l_relay_verbatim],
 }
 
 CATEGORY_TITLES = {
@@ -1401,4 +1635,5 @@ CATEGORY_TITLES = {
     "I": "Trust & load balancing (ch 11)",
     "J": "Server role & API key (ch 11)",
     "K": "Authenticated gossip (ch 11)",
+    "L": "Work-claims (ch 12)",
 }

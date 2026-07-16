@@ -398,6 +398,34 @@ class ProbePeer:
             ov["sig"] = self.key.sign(codec.overrides_signing_bytes(ov))
         return ov
 
+    def sign_claim(self, work_key: str, state: str = "active", seq: int = 0,
+                   epoch: float | None = None) -> dict:
+        """Mint a work-claim on THIS probe's own behalf and return the signed claim
+        dict (12): ``node`` = our id, ``pubkey`` = our advertised key, and a ``sig``
+        over ``CLAIM_CONTEXT ‖ canonical(claim)`` (the sig-less form), byte-identical
+        to the reference. ``epoch`` defaults to our own advertised incarnation so the
+        claim aligns with our liveness. A keyless probe returns the claim UNSIGNED
+        (no pubkey/sig) — accepted by the candidate but never authoritative, exactly
+        the reference's keyless degradation. Mirrors :meth:`signed_override`."""
+        with self._lock:
+            node_id = self.info.id
+            ep = self.info.epoch if epoch is None else epoch
+        claim = codec.ClaimRecord(
+            work_key=work_key, node=node_id, epoch=ep, seq=seq, state=state)
+        d = claim.to_dict()
+        if self.key is None:
+            return d  # keyless: no pubkey, no sig (never authoritative)
+        d["pubkey"] = self.pubkey
+        d.pop("sig", None)
+        d["sig"] = self.key.sign(codec.claim_signing_bytes(d))
+        return d
+
+    def send_claim(self, work_key: str, state: str = "active", seq: int = 0,
+                   epoch: float | None = None) -> bool:
+        """Convenience: mint (:meth:`sign_claim`) and gossip a work-claim to the
+        candidate over our link. Returns False if the link isn't up yet."""
+        return self.send(codec.work_claim(self.sign_claim(work_key, state, seq, epoch)))
+
     def _send_raw(self, conn: socket.socket, data: bytes) -> None:
         with self._lock:
             conn.sendall(data)

@@ -37,6 +37,11 @@ from .model import MAX_LINE_BYTES, PROTOCOL_VERSION
 # verify the exact same bytes; where they disagree, one violates the spec.
 ADVERT_CONTEXT = b"szpontnet-nodeinfo-v1:"
 OVERRIDES_CONTEXT = b"szpontnet-overrides-v1:"
+# A gossiped work-claim (an origination lease on a unit of work, ch 12) is signed
+# the same way under its OWN domain tag, so a claim signature can never be lifted
+# onto an advert/override or vice versa. Must match the reference's
+# ``protocol._CLAIM_CONTEXT`` byte-for-byte. See docs/szpontnet/12-work-claims.md.
+CLAIM_CONTEXT = b"szpontnet-workclaim-v1:"
 
 
 def _canonical(payload: dict) -> bytes:
@@ -57,6 +62,14 @@ def overrides_signing_bytes(overrides_dict: dict) -> bytes:
     """The exact bytes a placement-overrides ``sig`` covers, signed by the
     ``updatedBy`` editor (11)."""
     return OVERRIDES_CONTEXT + _canonical(overrides_dict)
+
+
+def claim_signing_bytes(claim_dict: dict) -> bytes:
+    """The exact bytes a work-claim's ``sig`` covers (12): the claim's own domain
+    tag followed by the canonical JSON of the claim dict with its ``sig`` removed.
+    Signed by the claimant ``node`` and verified against the inline ``pubkey``.
+    Byte-identical to the reference's ``protocol.claim_signing_bytes``."""
+    return CLAIM_CONTEXT + _canonical(claim_dict)
 
 
 # MARK: - NodeInfo (04-messages.md#nodeinfo)
@@ -202,6 +215,83 @@ class Job:
             return None
 
 
+# MARK: - ClaimRecord (04-messages.md#work-claim, 12-work-claims.md)
+
+
+@dataclass(frozen=True)
+class ClaimRecord:
+    """One node's self-signed origination lease on a unit of external work (12).
+
+    A work-claim deduplicates *origination*: nodes that independently observe the
+    same external event derive the same ``work_key`` and each claim it; a
+    deterministic rule (the lowest node id among live, trusted, active claimants)
+    elects a single owner and the losers yield. It is a **liveness-scoped lease** —
+    it counts only while its claimant is a live node.
+
+    ``pubkey``/``sig`` are carried inline so the record is self-authenticating and
+    are **omitted when empty** (byte-identical to the reference ``ClaimRecord`` and
+    to a keyless claim's compact form; a signed one round-trips byte-stable because
+    the sig covers the sig-less canonical form)."""
+
+    work_key: str
+    node: str  # claimant node id
+    pubkey: str = ""
+    epoch: float = 0.0  # claimant incarnation — aligns the lease with node liveness
+    seq: int = 0  # per-(node, work_key) counter; the freshest same-node record wins
+    state: str = "active"  # "active" | "released"
+    sig: str = ""
+
+    def to_dict(self) -> dict:
+        d = {
+            "workKey": self.work_key,
+            "node": self.node,
+            "epoch": self.epoch,
+            "seq": self.seq,
+            "state": self.state,
+        }
+        # Omit the crypto fields when empty so a keyless claim is compact and a
+        # signed one round-trips byte-stable (the sig covers the sig-less form).
+        if self.pubkey:
+            d["pubkey"] = self.pubkey
+        if self.sig:
+            d["sig"] = self.sig
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ClaimRecord | None":
+        """Parse a claim the way a conformant receiver must: a claim without a
+        non-empty ``workKey`` or ``node`` is meaningless and MUST be dropped."""
+        if not isinstance(d, dict):
+            return None
+        work_key, node = str(d.get("workKey", "")), str(d.get("node", ""))
+        if not work_key or not node:
+            return None
+        try:
+            return cls(
+                work_key=work_key,
+                node=node,
+                pubkey=str(d.get("pubkey", "")),
+                epoch=float(d.get("epoch", 0.0)),
+                seq=int(d.get("seq", 0)),
+                state=str(d.get("state", "active")),
+                sig=str(d.get("sig", "")),
+            )
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def active(self) -> bool:
+        # An unknown state MUST be treated as NOT active (12): a future state
+        # never counts as ownership.
+        return self.state == "active"
+
+    def newer_than(self, other: "ClaimRecord") -> bool:
+        """Freshness for merging two records from the SAME claimant: a new
+        incarnation always wins, then the per-key update counter (mirrors
+        NodeInfo)."""
+        return (self.epoch, self.seq) > (other.epoch, other.seq)
+
+
 # MARK: - Envelope encode / decode (03-transport.md#framing)
 
 
@@ -293,6 +383,13 @@ def node_update(info: NodeInfo) -> dict:
 
 def overrides_update(overrides: dict) -> dict:
     return {"t": "overrides", "overrides": overrides}
+
+
+def work_claim(claim_dict: dict) -> dict:
+    """Gossip a work-claim (12). Always carries the VERBATIM signed claim dict —
+    whether minted here or relayed — so its signature (over that dict's canonical
+    bytes) survives every hop unchanged, exactly like a relayed advertisement."""
+    return {"t": "work-claim", "claim": claim_dict}
 
 
 def set_attr(target_id: str, attrs: dict) -> dict:
@@ -454,6 +551,39 @@ def validate_heartbeat(msg: dict) -> list[str]:
     problems = validate_envelope(msg)
     if msg.get("t") != "heartbeat":
         problems.append(f"expected t=heartbeat, got {msg.get('t')!r}")
+    return problems
+
+
+def validate_work_claim(msg: dict) -> list[str]:
+    """Strict schema for a ``work-claim`` message a candidate EMITS (04/12): a
+    ``claim`` object whose required ``workKey``/``node`` are non-empty strings and
+    whose optional fields carry their spec types. ``pubkey``/``sig`` are optional
+    (a keyless claim omits them) but must be strings when present; a **keyed** claim
+    (non-empty ``pubkey``) MUST also carry a non-empty ``sig``."""
+    problems = validate_envelope(msg)
+    if msg.get("t") != "work-claim":
+        problems.append(f"expected t=work-claim, got {msg.get('t')!r}")
+    claim = msg.get("claim")
+    if not isinstance(claim, dict):
+        problems.append("work-claim.claim missing or not an object")
+        return problems
+    if not isinstance(claim.get("workKey"), str) or not claim.get("workKey"):
+        problems.append("claim.workKey missing or not a non-empty string")
+    if not isinstance(claim.get("node"), str) or not claim.get("node"):
+        problems.append("claim.node missing or not a non-empty string")
+    if "epoch" in claim and not _is_num(claim["epoch"]):
+        problems.append("claim.epoch not a number")
+    if "seq" in claim and not _is_int(claim["seq"]):
+        problems.append("claim.seq not an int")
+    if "state" in claim and not isinstance(claim["state"], str):
+        problems.append("claim.state not a string")
+    if "pubkey" in claim and not isinstance(claim["pubkey"], str):
+        problems.append("claim.pubkey not a string")
+    if "sig" in claim and not isinstance(claim["sig"], str):
+        problems.append("claim.sig not a string")
+    # A keyed claim (carries a pubkey) MUST be signed, or a receiver drops it (12).
+    if claim.get("pubkey") and not claim.get("sig"):
+        problems.append("keyed claim (has pubkey) missing sig")
     return problems
 
 

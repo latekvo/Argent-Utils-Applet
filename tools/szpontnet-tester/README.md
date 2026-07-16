@@ -11,13 +11,16 @@ byte-for-byte with any other implementation that also passes it.
 It speaks only the wire protocol from `docs/szpontnet/`; nothing here depends on
 the reference node's source. Every check names the MUST/SHOULD requirement and
 the spec section it enforces. Coverage spans the core protocol (chapters 01–10)
-**and chapter 11** — the trust / load-balancing layer and the server / API-key
+**chapter 11** — the trust / load-balancing layer and the server / API-key
 role: Ed25519 proof-of-possession, `surplus-first` dispatch, per-node `stats`,
 the `declined` job-status, server mode, API-key gating, and **authenticated
 gossip** — self-signed NodeInfo adverts and placement overrides, where a receiver
 rejects a keyed advert with a missing/stale/wrong-key signature, pins each node's
 id to its key so no relay can hijack another node's advertisement, and requires a
-valid signature on a non-default override from a known editor.
+valid signature on a non-default override from a known editor — **and chapter 12**,
+**work-claims**: gossiped self-signed origination leases, where a lower-id
+personal peer's active claim suppresses a `workKey` dispatch, a forged/keyless
+claim never owns anything, and an adopted claim is relayed verbatim.
 
 ## Requirements
 
@@ -121,6 +124,7 @@ resource-offering-only node is judged only on what it promises.
 | **I** | ch 11 trust + LB | empty-allowlist full trust, Ed25519 **proof of possession** over the domain-separated challenge (`"szpontnet-auth-v1:" ‖ nonce`), a keyless peer is foreign, requester classified from the **verified link** not `requestedBy`, `declined`-failover, `surplus-first` picks the most-surplus node, and `pubkey`/`stats` omit-when-empty byte-compat. |
 | **J** | ch 11 server / key | server mode never dispatches to a peer (and refuses an explicit peer target), the **API key** gates inbound dispatch (declined without, spawned with) and the control session. |
 | **K** | ch 11 authenticated gossip | a relayed **keyed advert** is dropped when its `sig` is missing, tampered (a field changed after signing), or made by a key other than its `pubkey` (with a correctly-signed advert learned as the positive control); a third node **cannot hijack** another peer's advertisement (id→key pin — spoofed content with an inflated seq leaves the victim's pinned key/identity unchanged); and a placement **override** is adopted only when validly signed by its `updatedBy` editor, rejected when tampered or forged by another node. |
+| **L** | ch 12 work-claims | a lower-id **personal** peer's active, signed work-claim is adopted as the key's owner and **suppresses** a control-session `dispatch` carrying that `workKey` (the slot reports `status: suppressed` with the owner); a keyed claim with an **invalid sig** is dropped (never suppresses); a **keyless** claim is non-authoritative (never owns, under a configured allowlist); and an adopted claim is **relayed verbatim** to the other linked peer (byte-identical, so the claimant's signature survives the hop). |
 
 ## Writing an adapter for your implementation
 
@@ -141,8 +145,8 @@ szpont/
   probe.py      the probe mesh: multi-identity trust-capable self-signing fake peers + an adversary hook
   candidate.py  launch + observe the candidate (ctl session / state.json)
   harness.py    per-scenario isolation (ports, timings, work dir)
-  suites.py     the conformance cases, grouped A–K (I/J/K = ch 11 trust + server/API-key + authenticated gossip)
-  selftest.py   pure oracle/codec self-tests (V1–V3 + ch-11 codec/oracle, without a node)
+  suites.py     the conformance cases, grouped A–L (I/J/K = ch 11 trust + server/API-key + authenticated gossip; L = ch 12 work-claims)
+  selftest.py   pure oracle/codec self-tests (V1–V3 + ch-11 codec/oracle + ch-12 claim codec, without a node)
   report.py     per-check reporting, MUST/SHOULD verdict, exit code
 adapters/
   reference.py  candidate adapter for linux/argent_utils/mesh

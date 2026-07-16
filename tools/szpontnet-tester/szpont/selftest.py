@@ -185,6 +185,61 @@ def _trust_codec(rep: Reporter) -> None:
               NodeInfo.from_dict(signed.to_dict()) == signed
               and "sig" not in NodeInfo(id="a" * 32).to_dict(), "MUST",
               "11-trust-and-balancing#conformance")
+    _claim_codec(rep)
+
+
+def _claim_codec(rep: Reporter) -> None:
+    from .codec import ClaimRecord
+    rep.begin_case("S8", "Work-claim codec: signing bytes, omit-when-empty, freshness (12)")
+    # The claim signing bytes are its OWN domain tag || canonical JSON (sorted
+    # keys, compact, `sig` stripped) — byte-identical to the reference.
+    c = {"workKey": "wk1", "node": "a" * 32, "pubkey": "AAAA", "epoch": 1.5,
+         "seq": 2, "state": "active", "sig": "STALE"}
+    rep.check("claim_signing_bytes = 'szpontnet-workclaim-v1:' || canonical(claim w/o sig)",
+              codec.claim_signing_bytes(c) ==
+              b'szpontnet-workclaim-v1:{"epoch":1.5,"node":"' + b"a" * 32 +
+              b'","pubkey":"AAAA","seq":2,"state":"active","workKey":"wk1"}', "MUST",
+              "12-work-claims#authentication")
+    rep.check("claim canonical form strips the sig field",
+              codec._canonical(c) == codec._canonical({k: v for k, v in c.items()
+                                                        if k != "sig"}), "MUST",
+              "12-work-claims#authentication")
+    # A keyless claim omits pubkey/sig; a signed one round-trips byte-stable.
+    keyless = ClaimRecord(work_key="wk", node="b" * 32)
+    kd = keyless.to_dict()
+    rep.check("a keyless claim omits pubkey and sig",
+              "pubkey" not in kd and "sig" not in kd, "MUST", "04-messages#work-claim")
+    keyed = ClaimRecord(work_key="wk", node="b" * 32, pubkey="AAAA", epoch=3.0,
+                        seq=4, state="released", sig="c2ln")
+    rep.check("a claim round-trips (encode→decode identity)",
+              ClaimRecord.from_dict(keyed.to_dict()) == keyed, "MUST",
+              "04-messages#work-claim")
+    # A claim without a non-empty workKey or node is invalid (MUST be dropped).
+    rep.check("a claim without workKey is invalid",
+              ClaimRecord.from_dict({"node": "x"}) is None, "MUST", "04-messages#work-claim")
+    rep.check("a claim without node is invalid",
+              ClaimRecord.from_dict({"workKey": "x"}) is None, "MUST", "04-messages#work-claim")
+    # An unknown state is NOT active (a future state never counts as ownership).
+    rep.check("state 'released' and any unknown state are not active",
+              not ClaimRecord(work_key="w", node="n", state="released").active
+              and not ClaimRecord(work_key="w", node="n", state="future").active
+              and ClaimRecord(work_key="w", node="n").active, "MUST",
+              "12-work-claims#the-claim-record")
+    # Freshness: epoch dominates seq, per (workKey, node).
+    older = ClaimRecord(work_key="w", node="n", epoch=1.0, seq=99)
+    newer = ClaimRecord(work_key="w", node="n", epoch=2.0, seq=0)
+    rep.check("claim freshness: higher epoch wins over higher seq",
+              newer.newer_than(older) and not older.newer_than(newer), "MUST",
+              "12-work-claims#the-claim-record")
+    # The validator rejects a keyed claim missing its sig; accepts a keyless one.
+    rep.check("validate_work_claim flags a keyed claim with no sig",
+              any("missing sig" in p for p in codec.validate_work_claim(
+                  {"t": "work-claim", "claim": {"workKey": "w", "node": "n",
+                                                "pubkey": "AAAA"}})), "MUST",
+              "12-work-claims#authentication")
+    rep.check("validate_work_claim accepts a well-formed signed claim",
+              codec.validate_work_claim(codec.work_claim(keyed.to_dict())) == [], "MUST",
+              "04-messages#work-claim")
 
 
 def _surplus_first_oracle(rep: Reporter, model) -> None:
