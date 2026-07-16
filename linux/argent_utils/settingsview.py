@@ -7,6 +7,8 @@ by a background data refresh.
 
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
@@ -46,6 +48,7 @@ class SettingsView(QWidget):
 
         root.addLayout(self._header_row())
         root.addLayout(self._identity_section())
+        root.addLayout(self._autofix_section())
         root.addLayout(self._tools_section())
         root.addLayout(self._terminal_section())
         root.addLayout(self._allocator_section())
@@ -56,9 +59,11 @@ class SettingsView(QWidget):
         store.allocator_changed.connect(self._refresh_allocator_ui)
         store.mesh_changed.connect(self._refresh_mesh_ui)
         store.update_changed.connect(self._refresh_update_ui)
+        store.autofix_changed.connect(self._refresh_autofix_ui)
         self._refresh_allocator_ui()
         self._refresh_mesh_ui()
         self._refresh_update_ui()
+        self._refresh_autofix_ui()
         store.refresh_allocator_install_async()
         store.refresh_update_status_async()
         if store.mesh_enabled:
@@ -117,6 +122,159 @@ class SettingsView(QWidget):
         col.addWidget(field)
         col.addWidget(hint)
         return col
+
+    # MARK: PR auto-fix monitor
+
+    def _autofix_section(self) -> QVBoxLayout:
+        col = QVBoxLayout()
+        col.setSpacing(6)
+        col.addWidget(_section_label("PR AUTO-FIX"))
+
+        self._cb_autofix = QCheckBox("Auto-fix my PRs (conflicts + reviews)")
+        self._cb_autofix.setChecked(self.store.pr_autofix_enabled)
+        self._cb_autofix.toggled.connect(self._on_autofix_toggled)
+        col.addWidget(self._cb_autofix)
+
+        self._autofix_status = QLabel("")
+        self._autofix_status.setStyleSheet("font-size: 10px;")
+        col.addWidget(self._autofix_status)
+
+        self._autofix_poll_err = QLabel("")
+        self._autofix_poll_err.setWordWrap(True)
+        self._autofix_poll_err.setStyleSheet("color: #FF3B30; font-size: 10px;")
+        col.addWidget(self._autofix_poll_err)
+
+        hint = QLabel(
+            "When on, an agent watches your open PRs and automatically resolves merge "
+            "conflicts and addresses new review threads. Turning it off pauses agent "
+            "dispatch."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: palette(mid); font-size: 10px;")
+        col.addWidget(hint)
+
+        self._cb_review_req = QCheckBox("Full-E2E review PRs that request my review")
+        self._cb_review_req.setChecked(self.store.review_requests_enabled)
+        self._cb_review_req.toggled.connect(self._on_review_req_toggled)
+        col.addWidget(self._cb_review_req)
+
+        self._review_req_hint = QLabel("")
+        self._review_req_hint.setWordWrap(True)
+        self._review_req_hint.setStyleSheet("color: palette(mid); font-size: 10px;")
+        col.addWidget(self._review_req_hint)
+
+        self._unaddressed = QLabel("")
+        self._unaddressed.setStyleSheet("color: #FF9500; font-size: 10px;")
+        col.addWidget(self._unaddressed)
+
+        # Auto-approve block — a container so it (and the verdict sub-block) can be
+        # shown/hidden as a unit (a QLayout can't be toggled; a QWidget can).
+        self._approve_container = QWidget()
+        approve = QVBoxLayout(self._approve_container)
+        approve.setContentsMargins(12, 0, 0, 0)
+        approve.setSpacing(4)
+
+        self._cb_auto_approve = QCheckBox("Let auto-reviews approve / request changes")
+        self._cb_auto_approve.setChecked(self.store.auto_approve_enabled)
+        self._cb_auto_approve.toggled.connect(self._on_auto_approve_toggled)
+        approve.addWidget(self._cb_auto_approve)
+
+        approve_hint = QLabel(
+            "Off ⇒ every auto-review leaves inline comments only; the approve / "
+            "request-changes call stays with you. On ⇒ a clean review may submit a "
+            "verdict, except where withheld below."
+        )
+        approve_hint.setWordWrap(True)
+        approve_hint.setStyleSheet("color: palette(mid); font-size: 10px;")
+        approve.addWidget(approve_hint)
+
+        self._verdict_container = QWidget()
+        verdict = QVBoxLayout(self._verdict_container)
+        verdict.setContentsMargins(12, 0, 0, 0)
+        verdict.setSpacing(2)
+        verdict.addWidget(_section_label("WITHHOLD THE FINAL VERDICT WHEN THE PR…"))
+        self._cb_verdict_skill = QCheckBox("…touches a SKILL")
+        self._cb_verdict_skill.setChecked(self.store.verdict_withhold_skill)
+        self._cb_verdict_skill.toggled.connect(lambda on: self._set_verdict("skill", on))
+        verdict.addWidget(self._cb_verdict_skill)
+        self._cb_verdict_installer = QCheckBox("…touches the installer")
+        self._cb_verdict_installer.setChecked(self.store.verdict_withhold_installer)
+        self._cb_verdict_installer.toggled.connect(
+            lambda on: self._set_verdict("installer", on)
+        )
+        verdict.addWidget(self._cb_verdict_installer)
+        self._cb_verdict_community = QCheckBox("…is a community PR (author outside the org)")
+        self._cb_verdict_community.setChecked(self.store.verdict_withhold_community)
+        self._cb_verdict_community.toggled.connect(
+            lambda on: self._set_verdict("community", on)
+        )
+        verdict.addWidget(self._cb_verdict_community)
+        approve.addWidget(self._verdict_container)
+
+        col.addWidget(self._approve_container)
+        return col
+
+    def _on_autofix_toggled(self, on: bool) -> None:
+        self.store.pr_autofix_enabled = on
+        self.store.changed.emit()
+        self._refresh_autofix_ui()
+        if on:
+            self.store.run_autofix_poll_async()
+
+    def _on_review_req_toggled(self, on: bool) -> None:
+        self.store.review_requests_enabled = on
+        self.store.changed.emit()
+        self._refresh_autofix_ui()
+        if on:
+            self.store.run_autofix_poll_async()
+
+    def _on_auto_approve_toggled(self, on: bool) -> None:
+        self.store.auto_approve_enabled = on
+        self.store.changed.emit()
+        self._refresh_autofix_ui()
+
+    def _set_verdict(self, which: str, on: bool) -> None:
+        setattr(self.store, f"verdict_withhold_{which}", on)
+        self.store.changed.emit()
+
+    def _refresh_autofix_ui(self) -> None:
+        autofix_on = self.store.pr_autofix_enabled
+        review_on = self.store.review_requests_enabled
+
+        self._autofix_status.setVisible(autofix_on)
+        if autofix_on:
+            st = self.store.autofix_status
+            live = bool(st) and (time.time() - st.get("updatedAt", 0)) < 15 * 60
+            if live:
+                n = st.get("watching", 0)
+                plural = "" if n == 1 else "s"
+                self._autofix_status.setText(f"● Active — watching {n} open PR{plural}.")
+                self._autofix_status.setStyleSheet("color: #34C759; font-size: 10px;")
+            else:
+                self._autofix_status.setText("○ Enabled, but no monitor has polled yet.")
+                self._autofix_status.setStyleSheet("color: #FF9500; font-size: 10px;")
+
+        err = self.store.autofix_poll_error
+        self._autofix_poll_err.setVisible(bool(err) and autofix_on)
+        if err:
+            self._autofix_poll_err.setText(f"⚠ Polls failing — {err}")
+
+        handled = self.store.review_requests_handled
+        suffix = f"  Reviewed {handled} so far." if handled else ""
+        self._review_req_hint.setText(
+            "When someone requests my review, spawns the most thorough review (Full "
+            "E2E, inline comments) — read-only, never touches their branch. A review "
+            "left unaddressed is retried automatically until it lands." + suffix
+        )
+
+        n = self.store.unaddressed_reviews
+        self._unaddressed.setVisible(review_on and n > 0)
+        if n > 0:
+            plural = "" if n == 1 else "s"
+            self._unaddressed.setText(f"↻ {n} unaddressed review{plural} — retrying")
+
+        self._approve_container.setVisible(review_on)
+        self._verdict_container.setVisible(review_on and self.store.auto_approve_enabled)
 
     # MARK: tool colour & visibility
 

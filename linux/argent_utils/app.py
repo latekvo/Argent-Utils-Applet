@@ -44,6 +44,18 @@ def auto_refresh_secs() -> float:
     return max(5.0, secs)
 
 
+def autofix_poll_secs() -> float:
+    """Cadence of the PR auto-fix monitor poll (matches the macOS 3-min default).
+    Overridable with ARGENT_UTILS_AUTOFIX_SECS; floored at 30s to protect the
+    shared GitHub rate-limit budget."""
+    raw = os.environ.get("ARGENT_UTILS_AUTOFIX_SECS")
+    try:
+        secs = float(raw) if raw else 3 * 60
+    except ValueError:
+        secs = 3 * 60
+    return max(30.0, secs)
+
+
 class ArgentUtilsApp:
     def __init__(self) -> None:
         self.app = QApplication.instance() or QApplication(sys.argv)
@@ -65,6 +77,15 @@ class ArgentUtilsApp:
         self.timer.setInterval(int(auto_refresh_secs() * 1000))
         self.timer.timeout.connect(self.trigger_refresh)
         self.timer.start()
+
+        # PR auto-fix monitor: poll on a background cadence, independent of the panel
+        # (matches the macOS monitor). The poll no-ops when both toggles are off.
+        self.autofix_timer = QTimer()
+        self.autofix_timer.setInterval(int(autofix_poll_secs() * 1000))
+        self.autofix_timer.timeout.connect(self.store.run_autofix_poll_async)
+        self.autofix_timer.start()
+        # First poll shortly after launch, once identity has had a moment to resolve.
+        QTimer.singleShot(3000, self.store.run_autofix_poll_async)
 
         # Resolve identity + first fetch eagerly.
         threading.Thread(target=self.store.fetch_me, daemon=True).start()

@@ -287,24 +287,31 @@ def user_shell() -> str:
     return os.environ.get("ARGENT_UTILS_SHELL") or os.environ.get("SHELL") or "/bin/bash"
 
 
-def shell_command(prompt_file: str) -> str:
-    """``cd '<repo>' 2>/dev/null; claude "$(cat '<file>')"; exec "$SHELL" -i``
+def shell_command(prompt_file: str, done_path: str | None = None) -> str:
+    """``cd '<repo>' 2>/dev/null; claude "$(cat '<file>')"; [printf %s $? > done;] exec "$SHELL" -i``
 
     Run (via :func:`user_shell`, interactively) so the user's rc is sourced and
     `claude` resolves to their alias. The trailing ``exec`` keeps the window open in
     the user's shell after the session ends.
+
+    When ``done_path`` is given, the agent's exit code is written there the moment
+    ``claude`` returns — an existence-based completion sentinel the PR auto-fix
+    monitor polls to tell a still-running agent from a finished one (the Linux
+    analogue of the macOS TrackedProcess done-file).
     """
     repo = shlex.quote(repo_path())
     pf = shlex.quote(prompt_file)
-    return f'cd {repo} 2>/dev/null; claude "$(cat {pf})"; exec "$SHELL" -i'
+    done = f"printf %s $? > {shlex.quote(done_path)}; " if done_path else ""
+    return f'cd {repo} 2>/dev/null; claude "$(cat {pf})"; {done}exec "$SHELL" -i'
 
 
-def spawn(prompt: str, preferred: SpawnTerminal | None) -> str:
+def spawn(prompt: str, preferred: SpawnTerminal | None, done_path: str | None = None) -> str:
     """Stage the prompt, open a new terminal window, run claude. Returns the
-    prompt file path. Fully detached from the applet."""
+    prompt file path. Fully detached from the applet. ``done_path`` (optional)
+    receives claude's exit code on completion — see :func:`shell_command`."""
     term = resolved(preferred)
     file = write_prompt(prompt)
-    cmd = shell_command(file)
+    cmd = shell_command(file, done_path)
     # Run under the user's INTERACTIVE shell (-i) so their rc is sourced and the
     # `claude` alias + exported env are present — a plain `bash -c` gets neither.
     argv = [term.exec_name, *term.prefix, user_shell(), "-i", "-c", cmd]

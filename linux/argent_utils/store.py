@@ -13,10 +13,24 @@ from datetime import datetime
 
 from PySide6.QtCore import QObject, QSettings, Signal
 
+import json
+import os
+import tempfile
 import threading
+import time
 
-from . import core, deviceallocator, review
+from . import (
+    activity,
+    autofix,
+    autofixmonitor,
+    bans,
+    conflicts,
+    core,
+    deviceallocator,
+    review,
+)
 from .models import API, Filters, Fmt, OpenIssue, OpenPR
+from .prtarget import PRTarget
 
 
 # MARK: - Value types
@@ -94,9 +108,16 @@ class Store(QObject):
     mesh_changed = Signal()
     # Emitted when the self-update status/progress changes.
     update_changed = Signal()
+    # Emitted after each PR auto-fix monitor poll (status pill, counts, poll error).
+    autofix_changed = Signal()
 
     _ORG = "argent-utils"
     _APP = "argent-utils"
+
+    # A tracked auto-fix agent whose completion sentinel never appears (window
+    # killed, machine slept) is considered finished after this long, so a stuck
+    # entry can't pin a PR as "in flight" forever.
+    _AUTOFIX_INFLIGHT_TTL = 2 * 60 * 60
 
     def __init__(self) -> None:
         super().__init__()
@@ -129,6 +150,19 @@ class Store(QObject):
         self.mesh_error: str | None = None
         # Render-only: force mesh_enabled on without persisting to real QSettings.
         self._mesh_enabled_override: bool | None = None
+
+        # PR auto-fix monitor: live-only runtime state (the toggles/counters persist
+        # via QSettings below). Mirrors AutofixStatus.swift + the monitor's poll-error
+        # + unaddressed-review signals.
+        self.autofix_status: dict | None = None
+        self.autofix_poll_error: str | None = None
+        self.autofix_poll_error_at: float | None = None
+        self.unaddressed_reviews = 0
+        self._poll_error_this_cycle: str | None = None
+        # In-flight auto-fix agents [{url, number, done, at}] — dedups against
+        # spawning a second agent on a PR one is already working.
+        self._autofix_inflight: list[dict] = []
+        self._autofix_lock = threading.Lock()
 
         # Honor the process-wide default format (NativeFormat unless overridden):
         # the two-arg QSettings(org, app) constructor is hardwired to NativeFormat,
@@ -208,6 +242,97 @@ class Store(QObject):
     def mesh_enabled(self, value: bool) -> None:
         self._settings.setValue("meshEnabled", bool(value))
 
+    # MARK: PR auto-fix monitor settings
+
+    @property
+    def pr_autofix_enabled(self) -> bool:
+        """Watch my open PRs and auto-resolve conflicts + address review threads.
+        On by default (matches macOS). The background poll no-ops when this and
+        review_requests_enabled are both off."""
+        return self._settings.value("prAutofixEnabled", True, bool)
+
+    @pr_autofix_enabled.setter
+    def pr_autofix_enabled(self, value: bool) -> None:
+        self._settings.setValue("prAutofixEnabled", bool(value))
+
+    @property
+    def review_requests_enabled(self) -> bool:
+        """Full-E2E review PRs that request my review (read-only, never touches their
+        branch), retrying an unaddressed review until it lands. On by default."""
+        return self._settings.value("reviewRequestsEnabled", True, bool)
+
+    @review_requests_enabled.setter
+    def review_requests_enabled(self, value: bool) -> None:
+        self._settings.setValue("reviewRequestsEnabled", bool(value))
+
+    @property
+    def auto_approve_enabled(self) -> bool:
+        """Whether a clean auto-review may submit a verdict. Off by default: an
+        auto-review never approves / requests-changes on my behalf until I opt in."""
+        return self._settings.value("autoApproveEnabled", False, bool)
+
+    @auto_approve_enabled.setter
+    def auto_approve_enabled(self, value: bool) -> None:
+        self._settings.setValue("autoApproveEnabled", bool(value))
+
+    @property
+    def verdict_withhold_skill(self) -> bool:
+        return self._settings.value("verdictWithholdSkill", True, bool)
+
+    @verdict_withhold_skill.setter
+    def verdict_withhold_skill(self, value: bool) -> None:
+        self._settings.setValue("verdictWithholdSkill", bool(value))
+
+    @property
+    def verdict_withhold_installer(self) -> bool:
+        return self._settings.value("verdictWithholdInstaller", True, bool)
+
+    @verdict_withhold_installer.setter
+    def verdict_withhold_installer(self, value: bool) -> None:
+        self._settings.setValue("verdictWithholdInstaller", bool(value))
+
+    @property
+    def verdict_withhold_community(self) -> bool:
+        return self._settings.value("verdictWithholdCommunity", True, bool)
+
+    @verdict_withhold_community.setter
+    def verdict_withhold_community(self, value: bool) -> None:
+        self._settings.setValue("verdictWithholdCommunity", bool(value))
+
+    @property
+    def verdict_policy(self) -> autofix.VerdictPolicy:
+        return autofix.VerdictPolicy(
+            self.verdict_withhold_skill,
+            self.verdict_withhold_installer,
+            self.verdict_withhold_community,
+        )
+
+    # Monitor counters — persisted so the "fixed N" pills survive a restart.
+
+    @property
+    def autofix_conflicts_handled(self) -> int:
+        return self._settings.value("autofixConflicts", 0, int)
+
+    @autofix_conflicts_handled.setter
+    def autofix_conflicts_handled(self, value: int) -> None:
+        self._settings.setValue("autofixConflicts", int(value))
+
+    @property
+    def autofix_reviews_handled(self) -> int:
+        return self._settings.value("autofixReviews", 0, int)
+
+    @autofix_reviews_handled.setter
+    def autofix_reviews_handled(self, value: int) -> None:
+        self._settings.setValue("autofixReviews", int(value))
+
+    @property
+    def review_requests_handled(self) -> int:
+        return self._settings.value("reviewRequestsHandled", 0, int)
+
+    @review_requests_handled.setter
+    def review_requests_handled(self, value: int) -> None:
+        self._settings.setValue("reviewRequestsHandled", int(value))
+
     # MARK: derived settings
 
     @property
@@ -283,6 +408,344 @@ class Store(QObject):
             self.is_loading = False
             self.loading_changed.emit(False)
             self.changed.emit()
+
+    # MARK: PR auto-fix monitor
+    #
+    # The Linux port of Store.swift's autofix monitor. A background poll (driven by
+    # a QTimer in app.py, independent of the panel) fetches my open PRs + the PRs
+    # requesting my review, edge-triggers on new conflicts / review threads, and
+    # spawns the same conflict-fix / review agents the panel wizards do — deduped by
+    # an in-flight sentinel and rate-limited by ReviewReconcile backoff. The pure
+    # decision logic lives in autofix.py; the GitHub reads in autofixmonitor.py.
+
+    def run_autofix_poll_async(self) -> None:
+        """Kick one monitor poll on a worker thread (guarded against overlap). Safe to
+        call from a QTimer whether or not the panel is open; no-ops when both toggles
+        are off."""
+        if not (self.pr_autofix_enabled or self.review_requests_enabled):
+            return
+        if not self._autofix_lock.acquire(blocking=False):
+            return  # a poll is already running
+
+        def work() -> None:
+            try:
+                self._autofix_poll_once()
+            finally:
+                self._autofix_lock.release()
+                self.autofix_changed.emit()
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _autofix_poll_once(self) -> None:
+        self._poll_error_this_cycle = None
+        if not self.effective_me:
+            self.fetch_me()
+        if not self.effective_me:
+            self._note_poll_failure(
+                "GitHub login unknown — is `gh` installed and authenticated?"
+            )
+        else:
+            cfg = core.config()
+            owner, repo = cfg["owner"], cfg["repo"]
+            if self.pr_autofix_enabled:
+                self._poll_my_prs(owner, repo)
+            if self.review_requests_enabled:
+                self._poll_review_requests(owner, repo)
+        self._settle_poll_error()
+
+    def _poll_my_prs(self, owner: str, repo: str) -> None:
+        try:
+            snaps = autofixmonitor.fetch_snapshots(owner, repo, self.effective_me)
+        except Exception as exc:  # noqa: BLE001 — any failure is a poll failure
+            self._note_poll_failure(exc)
+            return
+        now = time.time()
+        events, fps = autofix.compute_diff(self._load_fingerprints(), snaps)
+        for kind, snap in events:
+            if kind == "review":
+                self._dispatch_my_review(snap, 1)
+            # "conflict" events are intentionally a no-op here: the same poll's
+            # _reconcile_my_conflicts sees the CONFLICTING state and handles it
+            # (also covering conflicts that predate the baseline + failed spawns).
+        self._save_fingerprints(fps)
+        self._reconcile_my_reviews(snaps, now)
+        self._reconcile_my_conflicts(snaps, now)
+        self.autofix_status = {
+            "updatedAt": now,
+            "watching": len(snaps),
+            "conflictsHandled": self.autofix_conflicts_handled,
+            "reviewsHandled": self.autofix_reviews_handled,
+        }
+
+    def _reconcile_my_reviews(self, snaps: list, now: float) -> None:
+        """Level-triggered safety net: any PR of mine with unresolved threads I owe a
+        reply on but no agent on it gets a (re)dispatch, deduped by in-flight + backoff."""
+        key = "myReviewAttempts"
+        attempts = self._load_attempts(key)
+        owed = [s for s in snaps if s.threads_i_owe > 0]
+        for s in owed:
+            k = str(s.number)
+            action, val = autofix.decide(
+                attempts.get(k), "unresolved", self._in_flight(s.url), False, now
+            )
+            if action == "dispatch" and self._dispatch_my_review(s, int(val)):
+                attempts[k] = autofix.ReviewAttempt("unresolved", now, int(val))
+        owed_keys = {str(s.number) for s in owed}
+        self._save_attempts(key, {k: v for k, v in attempts.items() if k in owed_keys})
+
+    def _reconcile_my_conflicts(self, snaps: list, now: float) -> None:
+        """Level-triggered: any CONFLICTING PR of mine with no agent on it gets a
+        (re)dispatch. Records are kept while the PR is CONFLICTING/UNKNOWN and pruned
+        once it goes MERGEABLE."""
+        key = "myConflictAttempts"
+        attempts = self._load_attempts(key)
+        conflicted = [s for s in snaps if s.mergeable == "CONFLICTING"]
+        for s in conflicted:
+            k = str(s.number)
+            action, val = autofix.decide(
+                attempts.get(k), "conflicting", self._in_flight(s.url), False, now
+            )
+            if action == "dispatch" and self._dispatch_conflict_fix(
+                s.number, s.url, int(val), "auto"
+            ):
+                attempts[k] = autofix.ReviewAttempt("conflicting", now, int(val))
+        keep = {str(s.number) for s in snaps if s.mergeable != "MERGEABLE"}
+        self._save_attempts(key, {k: v for k, v in attempts.items() if k in keep})
+
+    def _poll_review_requests(self, owner: str, repo: str) -> None:
+        try:
+            reqs = autofixmonitor.fetch_review_requests(
+                owner, repo, self.effective_me, include_files=self.auto_approve_enabled
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._note_poll_failure(exc)
+            return
+        now = time.time()
+        banned = bans.read()
+        key = "reviewReqAttempts"
+        attempts = self._load_attempts(key)
+        owed = [r for r in reqs if r.owe_review]
+        for r in owed:
+            k = str(r.number)
+            stamp = r.requested_at or "-"
+            action, val = autofix.decide(
+                attempts.get(k),
+                stamp,
+                self._in_flight(r.url),
+                bans.is_banned(r.author, banned),
+                now,
+            )
+            if action == "dispatch" and self._dispatch_review_request(r, int(val)):
+                attempts[k] = autofix.ReviewAttempt(stamp, now, int(val))
+        # Prune records older than the retry ceiling (a request that's long gone).
+        self._save_attempts(
+            key,
+            {
+                k: v
+                for k, v in attempts.items()
+                if now - v.last_dispatched_at < autofix.RETRY_MAX_BACKOFF
+            },
+        )
+        self.unaddressed_reviews = sum(
+            1
+            for r in owed
+            if not self._in_flight(r.url) and not bans.is_banned(r.author, banned)
+        )
+
+    # MARK: monitor dispatch + tracking
+
+    def _dispatch_conflict_fix(
+        self, number: int, url: str, attempt: int, source: str
+    ) -> bool:
+        if self._in_flight(url):
+            return False
+        prompt = conflicts.ConflictConfig(
+            target=PRTarget.SPECIFIC, me=self.effective_me, specific_pr=str(number)
+        ).build_prompt()
+        if not self._spawn_tracked(prompt, url, number):
+            activity.log(source, "spawn-failed", f"Resolve #{number} failed to spawn")
+            return False
+        retry = f" · retry {attempt}" if attempt > 1 else ""
+        label = (
+            f"Auto · Resolve · #{number}{retry}"
+            if source == "auto"
+            else f"Resolve · #{number}"
+        )
+        activity.log(source, "conflicts", label)
+        # Count only what the monitor auto-fixed (a manual panel resolve isn't one).
+        if attempt == 1 and source == "auto":
+            self.autofix_conflicts_handled += 1
+        return True
+
+    def _dispatch_my_review(self, s, attempt: int = 1) -> bool:
+        if self._in_flight(s.url):
+            return False
+        prompt = review.ReviewConfig(
+            depth="deep",
+            target=PRTarget.SPECIFIC,
+            me=self.effective_me,
+            mark_ready=False,
+            leave_reviews=False,
+            reply_to_reviews=True,
+            specific_pr=str(s.number),
+            specific_author=review.SpecificAuthor.MINE,
+        ).build_prompt()
+        if not self._spawn_tracked(prompt, s.url, s.number):
+            activity.log("auto", "spawn-failed", f"Review #{s.number} failed to spawn")
+            return False
+        retry = f" · retry {attempt}" if attempt > 1 else ""
+        activity.log("auto", "review-reply", f"Auto · Review · #{s.number}{retry}")
+        if attempt == 1:
+            self.autofix_reviews_handled += 1
+        return True
+
+    def _dispatch_review_request(self, r, attempt: int = 1) -> bool:
+        if self._in_flight(r.url):
+            return False
+        reasons = self.verdict_policy.withhold_reasons(r.files, r.author_association)
+        verdict = self.auto_approve_enabled and not reasons
+        prompt = review.ReviewConfig(
+            depth="max",
+            target=PRTarget.SPECIFIC,
+            me=self.effective_me,
+            mark_ready=False,
+            leave_reviews=True,
+            reply_to_reviews=False,
+            specific_pr=str(r.number),
+            final_pass=verdict,
+            specific_author=review.SpecificAuthor.THEIRS,
+        ).build_prompt()
+        if not self._spawn_tracked(prompt, r.url, r.number):
+            activity.log("auto", "spawn-failed", f"Review-req #{r.number} failed to spawn")
+            return False
+        if verdict:
+            tag = " +verdict"
+        elif not self.auto_approve_enabled:
+            tag = " -verdict (auto-approvals off)"
+        else:
+            tag = f" -verdict ({', '.join(reasons)})"
+        retry = f" · retry {attempt}" if attempt > 1 else ""
+        activity.log(
+            "auto", "review-req", f"Auto · Review-req · #{r.number} (@{r.author}){tag}{retry}"
+        )
+        if attempt == 1:
+            self.review_requests_handled += 1
+        return True
+
+    def _spawn_tracked(self, prompt: str, url: str, number: int) -> bool:
+        """Spawn an agent with a completion sentinel and record it in-flight. Returns
+        whether the terminal launched."""
+        fd, done_path = tempfile.mkstemp(prefix="argent-autofix-done-", suffix=".txt")
+        os.close(fd)
+        try:
+            os.unlink(done_path)  # existence of this path later == the agent finished
+        except OSError:
+            pass
+        try:
+            review.spawn(prompt, self.terminal, done_path=done_path)
+        except review.SpawnError:
+            return False
+        self._autofix_inflight.append(
+            {"url": url, "number": number, "done": done_path, "at": time.time()}
+        )
+        return True
+
+    def _prune_inflight(self) -> None:
+        now = time.time()
+        live: list[dict] = []
+        for e in self._autofix_inflight:
+            done = e.get("done")
+            finished = bool(done) and os.path.exists(done)
+            if finished:
+                try:
+                    os.unlink(done)
+                except OSError:
+                    pass
+                continue
+            if now - e.get("at", 0) > self._AUTOFIX_INFLIGHT_TTL:
+                continue
+            live.append(e)
+        self._autofix_inflight = live
+
+    def _in_flight(self, url: str) -> bool:
+        self._prune_inflight()
+        return any(e["url"] == url for e in self._autofix_inflight)
+
+    # MARK: monitor persistence + poll-error state
+
+    def _note_poll_failure(self, err: object) -> None:
+        if self._poll_error_this_cycle is None:  # first failure of the cycle wins
+            self._poll_error_this_cycle = str(err)
+
+    def _settle_poll_error(self) -> None:
+        err = self._poll_error_this_cycle
+        if err:
+            if self.autofix_poll_error is None:
+                activity.log("auto", "poll-failed", f"Monitor poll failing: {err[:120]}")
+            self.autofix_poll_error = err
+            self.autofix_poll_error_at = time.time()
+        elif self.autofix_poll_error is not None:
+            activity.log("auto", "poll-recovered", "Monitor polls succeeding again")
+            self.autofix_poll_error = None
+            self.autofix_poll_error_at = None
+
+    def _load_fingerprints(self) -> dict:
+        raw = self._settings.value("autofixFingerprints", "", str)
+        try:
+            obj = json.loads(raw) if raw else {}
+        except ValueError:
+            return {}
+        out: dict[int, autofix.PRFingerprint] = {}
+        for k, v in (obj or {}).items():
+            try:
+                out[int(k)] = autofix.PRFingerprint(
+                    mergeable=v.get("mergeable", "UNKNOWN"),
+                    review_decision=v.get("reviewDecision", ""),
+                    threads_unresolved=int(v.get("threadsUnresolved", 0)),
+                )
+            except (ValueError, AttributeError):
+                continue
+        return out
+
+    def _save_fingerprints(self, fps: dict) -> None:
+        obj = {
+            str(k): {
+                "mergeable": f.mergeable,
+                "reviewDecision": f.review_decision,
+                "threadsUnresolved": f.threads_unresolved,
+            }
+            for k, f in fps.items()
+        }
+        self._settings.setValue("autofixFingerprints", json.dumps(obj))
+
+    def _load_attempts(self, key: str) -> dict:
+        raw = self._settings.value(key, "", str)
+        try:
+            obj = json.loads(raw) if raw else {}
+        except ValueError:
+            return {}
+        out: dict[str, autofix.ReviewAttempt] = {}
+        for k, v in (obj or {}).items():
+            try:
+                out[k] = autofix.ReviewAttempt(
+                    requested_at=v.get("requestedAt", ""),
+                    last_dispatched_at=float(v.get("lastDispatchedAt", 0.0)),
+                    attempts=int(v.get("attempts", 1)),
+                )
+            except (ValueError, AttributeError):
+                continue
+        return out
+
+    def _save_attempts(self, key: str, attempts: dict) -> None:
+        obj = {
+            k: {
+                "requestedAt": a.requested_at,
+                "lastDispatchedAt": a.last_dispatched_at,
+                "attempts": a.attempts,
+            }
+            for k, a in attempts.items()
+        }
+        self._settings.setValue(key, json.dumps(obj))
 
     # MARK: device allocator
 

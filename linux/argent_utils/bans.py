@@ -37,3 +37,11 @@ def read() -> list[BannedAuthor]:
             continue
         out.append(BannedAuthor(login=login, reason=b.get("reason"), pr=b.get("pr")))
     return out
+
+
+def is_banned(login: str, banned: list[BannedAuthor]) -> bool:
+    """Whether ``login`` is on the ban list (case-insensitive, as GitHub logins are).
+    Mirrors BanList.isBanned — the monitor must never dispatch an agent for a PR by a
+    banned (prompt-injection) author."""
+    low = (login or "").lower()
+    return any(b.login.lower() == low for b in banned)
