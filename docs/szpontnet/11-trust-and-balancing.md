@@ -357,9 +357,17 @@ correctly.
 > **Where the numbers come from.** The reference node books `jobCostUnits` of
 > usage each time it spawns a SzpontRequest, and exposes `set-attr` keys
 > (`plan`, `quotaLeft`, `usageAvg`, `usage`) to inject or correct the accounting.
-> Wiring `usageAvg`/`quotaLeft` to a first-party view of real Claude usage is a
-> follow-up; the *mechanism* - track, advertise, rank, decline - is what this
-> chapter specifies, and it degrades safely when the inputs are neutral.
+> When the node's **real quota probe** is live (the OAuth usage endpoint behind
+> the `tokens` auto-state), the advertised `quotaLeft` is additionally **capped
+> by the binding rate-limit window**:
+> `quotaLeft ≤ capacity × min(session_left, week_left)`. The tightest window is
+> what actually gates the next job - a node with 2% of its 5-hour session left
+> but 80% of its week left must not out-rank a modest node with real room, or
+> dispatch sends work to a host that runs dry mid-task. Heuristic fallback
+> estimates do not cap (they can read 0 for heavy users and would wrongly zero
+> a fresh node's surplus). The *mechanism* - track, advertise, rank, decline -
+> is what this chapter specifies, and it degrades safely when the inputs are
+> neutral.
 
 ### Surplus
 

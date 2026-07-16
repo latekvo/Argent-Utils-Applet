@@ -217,7 +217,7 @@ class MeshNode:
             sees=tuple(sorted(pid for pid, p in self.peers.items() if p.linked)),
             duties_enabled=self.local.duties_enabled,
             pubkey=self.key.public_b64 if self.key else "",
-            stats=self.stats.advertise(),
+            stats=self.stats.advertise(real_frac=self._real_quota_frac()),
         )
         return self._sign_advert(info)
 
@@ -240,6 +240,14 @@ class MeshNode:
         the state auto-derived from real local usage (cached in ``_token_state``)."""
         override = self.local.tokens
         return override if override in ("ok", "low", "out") else self._token_state
+
+    def _real_quota_frac(self) -> float | None:
+        """The REAL remaining fraction of the binding rate-limit window (min of
+        the 5-hour session and 7-day week) when the OAuth probe is live, else
+        None (heuristic fallback). Caps the advertised ``stats.quotaLeft`` so
+        dispatch surplus reflects the account's true room — a node with 2% of
+        its session left must not out-rank peers on bookkeeping alone."""
+        return self._token_frac if self._token_session is not None else None
 
     def _gossiped_tokens(self) -> tuple:
         """What peers currently know of our token budget, at wire granularity —

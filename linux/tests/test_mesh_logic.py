@@ -393,6 +393,57 @@ def test_surplus_first_is_account_type_aware():
     assert slots[0][1][0] == "big"
 
 
+def test_advertise_quota_left_capped_by_real_binding_window(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARGENT_MESH_DIR", str(tmp_path))
+    now = 1_000_000.0
+    st = stats.apply_stat_attrs(stats.load(now=now), {"plan": "max-20x"}, now=now)
+    assert st.quota_left() == 20.0  # bookkeeping alone: a full window
+    # Real probe live: the binding window (min of session/week) caps the advert.
+    assert st.advertise(real_frac=0.02)["quotaLeft"] == 0.4
+    # The cap only ever lowers — real room above the booked value doesn't inflate.
+    booked = stats.record(st, 15.0, now=now)  # bookkept quotaLeft 5.0
+    assert booked.advertise(real_frac=0.8)["quotaLeft"] == 5.0
+    # Heuristic fallback (no real probe) leaves the bookkeeping untouched.
+    assert booked.advertise()["quotaLeft"] == 5.0
+    # Out-of-range probe fractions clamp instead of corrupting the advert.
+    assert st.advertise(real_frac=-0.5)["quotaLeft"] == 0.0
+    assert st.advertise(real_frac=1.5)["quotaLeft"] == 20.0
+
+
+def test_surplus_first_avoids_host_with_drained_binding_window(tmp_path, monkeypatch):
+    # The regression: a Max 20× host with 2% of its 5-hour session left (but 80%
+    # of its week) must NOT win dispatch on bookkeeping surplus — it would run
+    # out mid-task. With the real-probe cap its advertised quotaLeft collapses
+    # to 0.02 × 20 = 0.4, so a modest fresh node out-ranks it.
+    monkeypatch.setenv("ARGENT_MESH_DIR", str(tmp_path))
+    now = 1_000_000.0
+    big = stats.apply_stat_attrs(stats.load(now=now), {"plan": "max-20x"}, now=now)
+    drained = NodeInfo(id="big", name="big", platform="linux", tier=1, tokens="low",
+                       tokens_pct=0.02, tokens_session_pct=0.02, tokens_week_pct=0.8,
+                       stats=big.advertise(real_frac=min(0.02, 0.8)))
+    fresh = _snode("fresh", "max-5x", quota=4.0, usage=1.0)  # surplus 3
+    slots = assign.slot_candidates("review", [drained, fresh], strategy="surplus-first")
+    assert slots == [("any", ["fresh", "big"])]
+    # Without the cap the same host advertises surplus 20 and wrongly wins.
+    from dataclasses import replace
+    uncapped = replace(drained, stats=big.advertise())
+    slots = assign.slot_candidates("review", [uncapped, fresh], strategy="surplus-first")
+    assert slots[0][1][0] == "big"
+
+
+def test_node_advert_wires_real_probe_fraction_into_stats(tmp_path, monkeypatch):
+    # MeshNode.info must thread the live probe's binding fraction into the
+    # advertised stats — the cap is useless if the advert path skips it.
+    node = _fresh_node(tmp_path, monkeypatch)
+    node.stats = stats.apply_stat_attrs(node.stats, {"plan": "max-20x"})
+    node._token_state, node._token_frac = "low", 0.02
+    node._token_session, node._token_week = 0.02, 0.8
+    assert node.info.stats["quotaLeft"] == 0.4
+    # Heuristic fallback (no real session/week reading): bookkeeping untouched.
+    node._token_session = node._token_week = None
+    assert node.info.stats["quotaLeft"] == 20.0
+
+
 def test_surplus_first_neutral_stats_fall_back_to_weakest_first():
     # No stats advertised ⇒ surplus 0 for all ⇒ ranking degrades to weakest-first
     # (highest tier number), preserving today's behavior for v1 nodes.

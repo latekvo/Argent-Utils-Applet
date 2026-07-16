@@ -15,7 +15,9 @@ advertised on the node's :class:`~argent_utils.mesh.protocol.NodeInfo`:
   ``plan.weight × capacityPerWeight`` (Max 20× has 4× the room of Max 5×); the
   window rolls every ``quotaWindowDays`` and resets what's been used. Absolute
   token quotas are deliberately not modelled — Anthropic's limits are dynamic —
-  so everything is compared in plan-relative units.
+  so everything is compared in plan-relative units. When the node's REAL quota
+  probe is live (usage.py), the *advertised* quotaLeft is additionally capped by
+  the binding rate-limit window — see :meth:`NodeStats.advertise`.
 
 State persists to ``~/.argent/mesh/stats.json`` (machine-local; only the derived
 ``advertise()`` view is gossiped). All time arithmetic takes an injectable
@@ -82,12 +84,25 @@ class NodeStats:
     def surplus(self) -> float:
         return self.quota_left() - self.usage_avg()
 
-    def advertise(self) -> dict:
-        """The gossiped view — what rides on NodeInfo.stats."""
+    def advertise(self, real_frac: float | None = None) -> dict:
+        """The gossiped view — what rides on NodeInfo.stats.
+
+        ``real_frac`` is the account's REAL remaining fraction in its binding
+        rate-limit window — min(5-hour session, 7-day week) — when the OAuth
+        quota probe is live, else None. It caps the advertised ``quotaLeft``:
+        whatever the local bookkeeping says, the account has no more room than
+        its tightest real window, so surplus-first dispatch can't route work to
+        a node that would run dry mid-task (e.g. 2% of the session left but 80%
+        of the week — the session gates the next job, not the week). Heuristic
+        fallback estimates deliberately do NOT cap: they can read 0 for heavy
+        users and would wrongly zero an actually-fresh node's surplus."""
+        left = self.quota_left()
+        if real_frac is not None:
+            left = min(left, self.capacity() * max(0.0, min(1.0, real_frac)))
         return {
             "plan": self.plan,
             "usageAvg": round(self.usage_avg(), 4),
-            "quotaLeft": round(self.quota_left(), 4),
+            "quotaLeft": round(left, 4),
         }
 
 

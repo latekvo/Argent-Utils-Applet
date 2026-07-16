@@ -92,6 +92,11 @@ def main() -> None:
     env["ARGENT_MESH_DIR"] = str(work_dir)
     # Keep the reference's activity feed inside the scenario dir, not real ~/.argent.
     env["HOME"] = str(work_dir)
+    # A conformance candidate must be deterministic: no live OAuth quota probe.
+    # (On macOS the Keychain resolves even under the sandboxed HOME, and a live
+    # read would cap the advertised quotaLeft with this machine's real budget,
+    # skewing seeded ch-11 stats.)
+    env["ARGENT_MESH_OAUTH_PROBE"] = "0"
     env["PYTHONPATH"] = os.pathsep.join([str(LINUX), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
 
     os.chdir(str(LINUX))
