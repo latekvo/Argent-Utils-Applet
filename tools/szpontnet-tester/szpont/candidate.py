@@ -33,6 +33,7 @@ def contract_env(
     node_id: str, name: str, platform: str, tier: int, tokens: str,
     duties_enabled: dict, spawn_cmd: str,
     server: bool = False, api_key: str = "", stats: dict | None = None,
+    foreign_spawn: str = "",
 ) -> dict:
     """The SZPONTNET_* environment a candidate (or its adapter) must honor.
 
@@ -40,6 +41,9 @@ def contract_env(
     byte-identical to before: ``SZPONTNET_SERVER`` puts the candidate in the
     accept-only server role, ``SZPONTNET_API_KEY`` gates inbound ctl/dispatch,
     and ``SZPONTNET_STATS`` seeds the node's advertised load-balancing stats.
+    ``SZPONTNET_FOREIGN_SPAWN`` (ch 13) is the confinement runner that turns a
+    foreign request from *declined* into *confined, response-only* execution — its
+    absence means no foreign execution, exactly the safe v1 default.
     """
     env = {
         "SZPONTNET_LOOPBACK": "1" if loopback else "0",
@@ -62,6 +66,13 @@ def contract_env(
         "SZPONTNET_TOKENS": tokens,
         "SZPONTNET_DUTIES": json.dumps(duties_enabled or {}),
         "SZPONTNET_SPAWN": spawn_cmd,
+        # Fast foreign (ch 13) reliable-delivery timings so a loopback scenario
+        # observes the executor's job-result retry cadence and give-up quickly (the
+        # shared defaults are 5s / 120s / 900s). Harmless for a node that ignores
+        # foreign execution — it never emits a job-result to retry.
+        "SZPONTNET_RESULT_RETRY_SECS": str(proto.get("foreignResultRetryIntervalSecs", 0.5)),
+        "SZPONTNET_RESULT_MAX_SECS": str(proto.get("foreignResultMaxSecs", 20.0)),
+        "SZPONTNET_FOREIGN_TIMEOUT_SECS": str(proto.get("foreignJobTimeoutSecs", 15.0)),
     }
     if server:
         env["SZPONTNET_SERVER"] = "1"
@@ -69,6 +80,8 @@ def contract_env(
         env["SZPONTNET_API_KEY"] = api_key
     if stats:
         env["SZPONTNET_STATS"] = json.dumps(stats)
+    if foreign_spawn:
+        env["SZPONTNET_FOREIGN_SPAWN"] = foreign_spawn
     return env
 
 

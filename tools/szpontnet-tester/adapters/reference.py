@@ -43,6 +43,13 @@ _MAP = {
     # Chapter-11 role knobs (11-trust-and-balancing).
     "SZPONTNET_SERVER": "ARGENT_MESH_SERVER",     # accept-only server role
     "SZPONTNET_API_KEY": "ARGENT_MESH_API_KEY",   # inbound ctl/dispatch gate
+    # Chapter-13 foreign zero-trust execution: the confinement runner that turns a
+    # foreign request from declined into confined, response-only, plus fast foreign
+    # reliable-delivery timings so a loopback scenario observes retry/ack quickly.
+    "SZPONTNET_FOREIGN_SPAWN": "ARGENT_MESH_FOREIGN_SPAWN",  # confinement runner
+    "SZPONTNET_RESULT_RETRY_SECS": "ARGENT_MESH_RESULT_RETRY_SECS",
+    "SZPONTNET_RESULT_MAX_SECS": "ARGENT_MESH_RESULT_MAX_SECS",
+    "SZPONTNET_FOREIGN_TIMEOUT_SECS": "ARGENT_MESH_FOREIGN_TIMEOUT_SECS",
 }
 
 

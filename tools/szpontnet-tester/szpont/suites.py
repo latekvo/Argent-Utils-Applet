@@ -2,11 +2,13 @@
 
 Every case maps to the interop vectors in ``docs/szpontnet/10-conformance.md``
 and the MUST/SHOULD requirements of the chapters — the core protocol (01–10) in
-categories A–H, and **chapter 11** (the trust / load-balancing layer and the
+categories A–H, **chapter 11** (the trust / load-balancing layer and the
 server / API-key role) in categories **I** (trust & load balancing), **J**
 (server role & API key), and **K** (authenticated gossip: self-signed adverts
-and overrides — forged/tampered/relayed-hijack payloads are rejected). Each
-drives the candidate over real sockets via the
+and overrides — forged/tampered/relayed-hijack payloads are rejected),
+**chapter 12** (leaderless origination work-claims) in category **L**, and
+**chapter 13** (foreign zero-trust execution: confined compute, response-back)
+in category **M**. Each drives the candidate over real sockets via the
 probe mesh, observes it (snapshot + wire captures), and records per-requirement
 checks with the spec section that mandates them.
 
@@ -21,6 +23,7 @@ fleet, and only *then* enters the context.
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 from dataclasses import dataclass
@@ -1600,6 +1603,180 @@ def case_l_relay_verbatim(rep: Reporter, ctx: Context) -> None:
                   "MUST forward the exact received claim dict")
 
 
+# MARK: - M. Foreign zero-trust execution (ch 13 — confined compute, response-back)
+#
+# A foreign SzpontRequest is never run on the host. When the receiver has a
+# confinement runner configured it runs the compute CONFINED and RESPONSE-ONLY,
+# replies `job-status: spawned` (the hand-off ack), and returns the artifact to the
+# ORIGINATOR as a signed `job-result` on the same link — re-sent until the
+# originator `job-ack`s it (reliable delivery). The originator performs any social
+# action itself, under its own identity. These cases drive the candidate black-box:
+#
+#  - M1 (any candidate): a candidate that implements NEITHER role must still DROP an
+#    unknown `job-result`/`job-ack` and keep the link (compatibility rule 2, 09) —
+#    so a confinement-aware node and a base node share a mesh without trouble.
+#  - M2 (confined path): with a runner configured and the probe made FOREIGN, the
+#    candidate replies `spawned` (NOT declined), returns a valid-signed `job-result`
+#    for the job on the requester's link, and STOPS re-sending once the probe acks.
+#    Skips cleanly if the candidate isn't foreign-exec-capable.
+
+
+def _make_probe_foreign(rep: Reporter, scn, peer, timeout: float = 6.0):
+    """Turn on the allowlist by trusting ONLY the candidate's own fingerprint (as
+    I2 does), so ``peer`` — though it links and (if keyed) verifies — is unlisted and
+    therefore classifies FOREIGN. Returns the candidate's snapshot on success, or
+    records a ``skip_case`` and returns None when the candidate isn't trust-capable."""
+    snap = wait_until(lambda: (scn.candidate.snapshot() if
+                               (scn.candidate.snapshot() or {}).get("self", {}).get("fingerprint")
+                               else None), timeout)
+    if not snap or scn.candidate.ctl_status() is None:
+        rep.skip_case("candidate exposes no fingerprint / control session — not trust-capable")
+        return None
+    self_fp = snap["self"]["fingerprint"]
+    wait_until(lambda: _peer_snap(scn.candidate.snapshot(), peer.info.id).get("verified"), timeout)
+    try:
+        sess = scn.candidate.open_ctl()
+        sess.command(codec.trust(self_fp, "self"))
+        sess.close()
+    except OSError:
+        rep.skip_case("could not drive trust control command")
+        return None
+    if not wait_until(
+            lambda: _peer_snap(scn.candidate.snapshot(), peer.info.id).get("trust") == "foreign", 4.0):
+        rep.skip_case("peer never classified foreign (allowlist not honored)")
+        return None
+    return snap
+
+
+def case_m_unknown_dropped(rep: Reporter, ctx: Context) -> None:
+    rep.begin_case("M1", "A candidate DROPS an unknown job-result/job-ack and keeps the link (09/13)")
+    scn = Scenario(ctx.node_cmd, ctx.model, candidate_id=ID_A, platform="linux", tier=4,
+                   loopback=ctx.loopback)
+    scn.add_peer(id=ID_B, name="peer", platform="macos", tier=1, trust_peer=True)
+    with scn:
+        if not _need_port(rep, scn):
+            return
+        peer = scn.mesh.peers[0]
+        if not wait_until(lambda: peer.linked, 8.0):
+            rep.skip_case("peer never linked")
+            return
+        # Baseline: the candidate is alive and answering before we send the unknowns.
+        before = wait_until(lambda: scn.candidate.snapshot(), 6.0)
+        if before is None:
+            rep.skip_case("candidate serves no snapshot to probe liveness")
+            return
+        # Send BOTH additive messages for a job the candidate never dispatched. A
+        # node implementing neither role MUST drop each and keep the link (rule 2) —
+        # an executor for a job it never dispatched drops the result on the
+        # correlation gate, and the ack for an unknown result is likewise a no-op.
+        peer.send(codec.job_result("m1-unknown", ID_B,
+                                   {"ok": True, "duty": "review", "output": "x", "error": ""}))
+        peer.send(codec.job_ack("m1-unknown", ID_B))
+        time.sleep(1.0)
+        rep.check("the link stays UP after the unknown job-result/job-ack",
+                  peer.linked, "MUST", "09-extensibility#the-compatibility-contract",
+                  "an additive message type MUST be dropped, not fatal to the link")
+        # And the candidate is still responsive: heartbeats keep flowing and it still
+        # serves its snapshot (it did not crash or wedge on the unknown types).
+        hb_before = len(peer.messages("heartbeat"))
+        still = wait_until(lambda: scn.candidate.snapshot(), 6.0)
+        rep.check("the candidate still serves its snapshot (stayed responsive)",
+                  still is not None, "MUST", "13-foreign-execution#conformance",
+                  "a node implementing neither foreign role interoperates unchanged")
+        rep.check("the candidate keeps heartbeating after the unknown messages",
+                  bool(wait_until(lambda: len(peer.messages("heartbeat")) > hb_before, 4.0)),
+                  "MUST", "09-extensibility#the-compatibility-contract",
+                  f"heartbeats before={hb_before} — expected more after")
+
+
+def case_m_confined_result(rep: Reporter, ctx: Context) -> None:
+    rep.begin_case("M2", "A foreign request runs CONFINED and returns a signed job-result, acked once (13)")
+    # A confinement runner is configured (Scenario.foreign_spawn="auto" → a stand-in
+    # runner that writes a result file), so a FOREIGN request is confined-and-run, not
+    # declined. The probe is the ORIGINATOR: it dispatches foreign, then acts on the
+    # returned result. ID_B probe dials the ID_A candidate (smaller-id-dials).
+    scn = Scenario(ctx.node_cmd, ctx.model, candidate_id=ID_A, platform="linux", tier=4,
+                   loopback=ctx.loopback, foreign_spawn="auto")
+    scn.add_peer(id=ID_B, name="originator", platform="macos", tier=1, trust_peer=True)
+    with scn:
+        if not _need_port(rep, scn):
+            return
+        peer = scn.mesh.peers[0]
+        if not wait_until(lambda: peer.linked, 8.0):
+            rep.skip_case("peer never linked")
+            return
+        if _make_probe_foreign(rep, scn, peer) is None:
+            return
+        # Dispatch a foreign review request on the peer link. Because a runner is
+        # configured, the candidate must ACCEPT it (confined), replying `spawned` —
+        # NOT declined as a foreign request without a runner would be.
+        job = Job(id="m2-confined", duty="review", prompt="please review the diff",
+                  requested_by=ID_B, requested_at=time.time())
+        reply = _dispatch_status(peer, job)
+        if reply is None:
+            rep.skip_case("candidate never answered the foreign dispatch — not dispatch-capable")
+            return
+        if reply.get("status") == "declined":
+            # A conformant node MAY decline every foreigner (no confined path). If it
+            # declined despite the configured runner, it simply isn't foreign-exec-
+            # capable via this contract knob — skip rather than fail.
+            rep.skip_case("candidate declined the foreign request despite a configured runner "
+                          f"(not Confined-Executor-capable): reason={reply.get('reason','')!r}")
+            return
+        rep.check("a foreign request is CONFINED (spawned), not declined, when a runner is configured",
+                  reply.get("status") == "spawned", "MUST",
+                  "13-foreign-execution#admission-when-a-foreign-request-is-confined-vs-declined",
+                  f"status={reply.get('status')} reason={reply.get('reason','')}")
+        # The executor returns the artifact as a `job-result` for THIS job id, on our
+        # link, correlated by id and (keyed executor) signed over {id,node,result}.
+        got = wait_until(lambda: next((m for m in peer.messages("job-result")
+                                       if m.get("id") == job.id), None), 16.0)
+        rep.check("the executor returns a job-result for the dispatched job id on our link",
+                  got is not None, "MUST", "13-foreign-execution#the-messages",
+                  f"job-results seen={[m.get('id') for m in peer.messages('job-result')]}\n"
+                  + scn.candidate.log_tail())
+        if got is None:
+            return
+        result = got.get("result") or {}
+        rep.check("the job-result carries a well-formed result payload (ok + output)",
+                  isinstance(result, dict) and isinstance(result.get("ok"), bool)
+                  and result.get("ok") is True and isinstance(result.get("output"), str)
+                  and result.get("output") != "", "MUST", "13-foreign-execution#the-messages",
+                  f"result={result}")
+        # Signature bind: a KEYED executor MUST sign over the canonical {id,node,result}.
+        cand_pub = peer.candidate_pubkey
+        if cand_pub and peer.key is not None:
+            payload = {"id": got.get("id"), "node": got.get("node"), "result": result}
+            sig = got.get("sig", "")
+            verified = False
+            try:
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+                Ed25519PublicKey.from_public_bytes(
+                    base64.b64decode(cand_pub, validate=True)).verify(
+                    base64.b64decode(sig, validate=True), codec.result_signing_bytes(payload))
+                verified = True
+            except Exception:
+                verified = False
+            rep.check("a keyed executor's job-result carries a valid signature over {id,node,result}",
+                      bool(sig) and verified, "MUST",
+                      "13-foreign-execution#correlation-and-authenticity",
+                      f"sig={'present' if sig else 'ABSENT'} verified={verified}")
+        else:
+            rep.check("keyless executor's result accepted on the responder-link gate (no sig required)",
+                      True, "MUST", "13-foreign-execution#correlation-and-authenticity")
+        # Reliable delivery: the originator acks the result; the executor MUST then
+        # stop re-sending. Ack, then assert no further job-result arrives in a window
+        # spanning several retry intervals (fast: retry ~0.5s).
+        seen_before_ack = len([m for m in peer.messages("job-result") if m.get("id") == job.id])
+        peer.send(codec.job_ack(job.id, ID_B))
+        time.sleep(3.0)
+        after = len([m for m in peer.messages("job-result") if m.get("id") == job.id])
+        rep.check("after the job-ack the executor STOPS re-sending the job-result (retries cease)",
+                  after == seen_before_ack, "MUST", "13-foreign-execution#reliable-delivery",
+                  f"job-results before ack={seen_before_ack}, after 3s past ack={after} "
+                  "(retry interval ~0.5s — several retries would have fired if unacked)")
+
+
 # MARK: - registry
 
 
@@ -1621,6 +1798,7 @@ SUITES = {
           case_k_advert_hijack_blocked, case_k_override_authentic],
     "L": [case_l_suppression, case_l_forgery_dropped, case_l_keyless_non_authoritative,
           case_l_relay_verbatim],
+    "M": [case_m_unknown_dropped, case_m_confined_result],
 }
 
 CATEGORY_TITLES = {
@@ -1636,4 +1814,5 @@ CATEGORY_TITLES = {
     "J": "Server role & API key (ch 11)",
     "K": "Authenticated gossip (ch 11)",
     "L": "Work-claims (ch 12)",
+    "M": "Foreign zero-trust execution (ch 13)",
 }

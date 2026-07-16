@@ -42,6 +42,13 @@ OVERRIDES_CONTEXT = b"szpontnet-overrides-v1:"
 # onto an advert/override or vice versa. Must match the reference's
 # ``protocol._CLAIM_CONTEXT`` byte-for-byte. See docs/szpontnet/12-work-claims.md.
 CLAIM_CONTEXT = b"szpontnet-workclaim-v1:"
+# A `job-result` — the computed artifact a FOREIGN, confined SzpontRequest returns
+# to its originator (who then performs any social action itself, ch 13) — is signed
+# under its OWN domain tag over the canonical ``{id,node,result}``, so a result
+# signature can never be lifted onto an advert/override/claim or vice versa. Must
+# match the reference's ``protocol._RESULT_CONTEXT`` byte-for-byte. See
+# docs/szpontnet/13-foreign-execution.md.
+RESULT_CONTEXT = b"szpontnet-jobresult-v1:"
 
 
 def _canonical(payload: dict) -> bytes:
@@ -70,6 +77,16 @@ def claim_signing_bytes(claim_dict: dict) -> bytes:
     Signed by the claimant ``node`` and verified against the inline ``pubkey``.
     Byte-identical to the reference's ``protocol.claim_signing_bytes``."""
     return CLAIM_CONTEXT + _canonical(claim_dict)
+
+
+def result_signing_bytes(result_payload: dict) -> bytes:
+    """The exact bytes a ``job-result``'s ``sig`` covers (13): the result's own
+    domain tag followed by the canonical JSON of ``{"id","node","result"}`` with any
+    ``sig`` removed. Signed by the executor ``node`` and verified against the
+    executor's pinned key so a relay or a third peer on the link can neither forge
+    nor tamper with the returned artifact. Byte-identical to the reference's
+    ``protocol.result_signing_bytes``."""
+    return RESULT_CONTEXT + _canonical(result_payload)
 
 
 # MARK: - NodeInfo (04-messages.md#nodeinfo)
@@ -429,6 +446,26 @@ def untrust(fingerprint: str) -> dict:
 
 def job_status(job_id: str, status: str, reason: str = "", node_id: str = "") -> dict:
     return {"t": "job-status", "id": job_id, "status": status, "reason": reason, "node": node_id}
+
+
+def job_result(job_id: str, node_id: str, result: dict, sig: str = "") -> dict:
+    """The computed artifact a FOREIGN, confined SzpontRequest returns to its
+    originator (13): correlated by Job ``id``, carrying the executor's ``node`` id
+    and the ``result`` payload ({ok, duty, output, error}). A KEYED executor MUST
+    sign it over :func:`result_signing_bytes`; ``sig`` is OMITTED when empty (a
+    keyless executor carries none, accepted on the responder-link gate alone), so a
+    keyless result stays byte-identical to a bare one."""
+    msg = {"t": "job-result", "id": job_id, "node": node_id, "result": result}
+    if sig:
+        msg["sig"] = sig
+    return msg
+
+
+def job_ack(job_id: str, node_id: str) -> dict:
+    """The originator's acknowledgement of a ``job-result`` (13), by Job ``id``,
+    carrying the acknowledging (originator) ``node`` id. Stops the executor's
+    reliable-delivery retries."""
+    return {"t": "job-ack", "id": job_id, "node": node_id}
 
 
 def status_request() -> dict:

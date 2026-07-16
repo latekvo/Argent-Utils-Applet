@@ -24,6 +24,7 @@ def run(rep: Reporter) -> None:
     _permutation_invariance(rep, model)
     _trust_codec(rep)
     _surplus_first_oracle(rep, model)
+    _result_codec(rep)
 
 
 def _codec_roundtrips(rep: Reporter) -> None:
@@ -240,6 +241,83 @@ def _claim_codec(rep: Reporter) -> None:
     rep.check("validate_work_claim accepts a well-formed signed claim",
               codec.validate_work_claim(codec.work_claim(keyed.to_dict())) == [], "MUST",
               "04-messages#work-claim")
+
+
+def _result_codec(rep: Reporter) -> None:
+    rep.begin_case("S9", "Job-result/ack codec: builder shapes, signing bytes, sig verify/tamper (13)")
+    # The job-result builder carries the correlation id, executor node and payload;
+    # `sig` is OMITTED when empty (a keyless executor's result is byte-identical to a
+    # bare one) and PRESENT when supplied (a keyed executor MUST sign).
+    result = {"ok": True, "duty": "review", "output": "the body", "error": ""}
+    keyless = codec.job_result("b1c2", "a" * 32, result)
+    rep.check("job_result builder shape {t,id,node,result}, sig omitted when empty",
+              keyless == {"t": "job-result", "id": "b1c2", "node": "a" * 32,
+                          "result": result} and "sig" not in keyless, "MUST",
+              "13-foreign-execution#the-messages")
+    keyed = codec.job_result("b1c2", "a" * 32, result, sig="c2ln")
+    rep.check("a supplied sig appears on the wire (a keyed executor signs)",
+              keyed.get("sig") == "c2ln", "MUST", "13-foreign-execution#the-messages")
+    rep.check("job_ack builder shape {t,id,node}",
+              codec.job_ack("b1c2", "3" * 32) ==
+              {"t": "job-ack", "id": "b1c2", "node": "3" * 32}, "MUST",
+              "13-foreign-execution#the-messages")
+    # The signing bytes are the result's OWN domain tag || canonical JSON of
+    # {id,node,result} (sorted keys, compact, `sig` stripped) — byte-identical to
+    # the reference. Note it covers ONLY those three fields, not the envelope `t`/`v`.
+    p = {"id": "b1c2", "node": "a" * 32, "result": result, "sig": "STALE"}
+    rep.check("result_signing_bytes = 'szpontnet-jobresult-v1:' || canonical({id,node,result} w/o sig)",
+              codec.result_signing_bytes(p) ==
+              b'szpontnet-jobresult-v1:{"id":"b1c2","node":"' + b"a" * 32 +
+              b'","result":{"duty":"review","error":"","ok":true,"output":"the body"}}',
+              "MUST", "13-foreign-execution#correlation-and-authenticity")
+    rep.check("result canonical form strips the sig field",
+              codec._canonical(p) == codec._canonical({k: v for k, v in p.items()
+                                                       if k != "sig"}), "MUST",
+              "13-foreign-execution#correlation-and-authenticity")
+    # A valid signature verifies over the canonical bytes; a tampered `result` (or a
+    # wrong key) does NOT — the originator drops the latter (keyed executor MUST sign,
+    # bad/absent sig dropped). Uses cryptography when available; skips the crypto
+    # asserts cleanly (as a MUST-satisfied no-op) on a host without it, exactly as the
+    # probe degrades to keyless.
+    try:
+        import base64
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+            Ed25519PrivateKey, Ed25519PublicKey)
+    except Exception:  # pragma: no cover - only where cryptography is absent
+        rep.check("signature verify/tamper checks (cryptography unavailable — skipped)",
+                  True, "MUST", "13-foreign-execution#correlation-and-authenticity")
+        return
+
+    def raw_pub(pk) -> bytes:
+        return pk.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+
+    priv = Ed25519PrivateKey.generate()
+    pub_raw = raw_pub(priv)
+    payload = {"id": "b1c2", "node": "a" * 32, "result": result}
+    sig_b64 = base64.b64encode(priv.sign(codec.result_signing_bytes(payload))).decode()
+
+    def verifies(pub_raw_bytes, pay, sig64) -> bool:
+        try:
+            Ed25519PublicKey.from_public_bytes(pub_raw_bytes).verify(
+                base64.b64decode(sig64), codec.result_signing_bytes(pay))
+            return True
+        except Exception:
+            return False
+
+    rep.check("a valid signature verifies over the canonical {id,node,result}",
+              verifies(pub_raw, payload, sig_b64), "MUST",
+              "13-foreign-execution#correlation-and-authenticity")
+    tampered = {"id": "b1c2", "node": "a" * 32,
+                "result": {**result, "output": "a MALICIOUS body"}}
+    rep.check("a tampered result does NOT verify against the original signature",
+              not verifies(pub_raw, tampered, sig_b64), "MUST",
+              "13-foreign-execution#correlation-and-authenticity")
+    other_raw = raw_pub(Ed25519PrivateKey.generate())
+    rep.check("the signature does NOT verify against a wrong (different) key",
+              not verifies(other_raw, payload, sig_b64), "MUST",
+              "13-foreign-execution#correlation-and-authenticity")
 
 
 def _surplus_first_oracle(rep: Reporter, model) -> None:

@@ -26,6 +26,12 @@ FAST_TIMINGS = {
     "peerTimeoutSecs": 2.0,
     "dispatchAckTimeoutSecs": 4.0,
     "stateWriteIntervalSecs": 0.25,
+    # Foreign (ch 13) reliable-delivery timings, scaled down like the rest so a
+    # loopback scenario observes the executor's job-result retry/ack round-trip in
+    # seconds (shared defaults are 5s / 120s / 900s).
+    "foreignResultRetryIntervalSecs": 0.5,
+    "foreignResultMaxSecs": 20.0,
+    "foreignJobTimeoutSecs": 15.0,
 }
 
 # Distinct 32-hex ids with a/b/c prefixes so lexical id order is obvious.
@@ -71,6 +77,7 @@ class Scenario:
         mesh_secret: str | None = None, loopback: bool = True,
         spawn_marker: Path | None = None, work_root: Path | None = None,
         server: bool = False, api_key: str = "", stats: dict | None = None,
+        foreign_spawn: str = "",
     ) -> None:
         self.node_cmd = shlex.split(node_cmd)
         self.model = model
@@ -85,6 +92,8 @@ class Scenario:
         self.server = server
         self.api_key = api_key
         self.stats = stats
+        # Chapter-13 confinement runner (default off → a foreign request is declined).
+        self.foreign_spawn = foreign_spawn
         # The secret the PROBE peers/clients present. Defaults to the candidate's,
         # but a fence test can set a *wrong* one to prove the candidate refuses it.
         self.mesh_secret = secret if mesh_secret is None else mesh_secret
@@ -106,6 +115,14 @@ class Scenario:
         # Marker file named after this candidate: proves an executor actually ran.
         return f"cp {{prompt_file}} {self.spawn_marker}/{self.name}.txt"
 
+    def confined_template(self) -> str:
+        """A stand-in confinement runner (ch 13): it doesn't isolate anything — it
+        just writes an artifact to ``{result_file}`` so the candidate produces a real
+        ``job-result`` to return. Enough to exercise the confined → result-back →
+        ack wire path black-box; the *isolation quality* of a real sandbox is the
+        operator's concern, not the wire mechanism this case tests."""
+        return "printf 'confined-review-ok' > {result_file}"
+
     def __enter__(self) -> "Scenario":
         env = candmod.contract_env(
             work_dir=self.work_dir, proto=self.proto, loopback=self.loopback,
@@ -113,6 +130,8 @@ class Scenario:
             platform=self.platform, tier=self.tier, tokens=self.tokens,
             duties_enabled=self.duties, spawn_cmd=self.spawn_template(),
             server=self.server, api_key=self.api_key, stats=self.stats,
+            foreign_spawn=(self.confined_template() if self.foreign_spawn == "auto"
+                           else self.foreign_spawn),
         )
         self.candidate = candmod.Candidate(
             self.node_cmd, env, self.work_dir, secret=self.secret, api_key=self.api_key)

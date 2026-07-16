@@ -426,6 +426,27 @@ class ProbePeer:
         candidate over our link. Returns False if the link isn't up yet."""
         return self.send(codec.work_claim(self.sign_claim(work_key, state, seq, epoch)))
 
+    def sign_result(self, job_id: str, result: dict) -> dict:
+        """Build a signed ``job-result`` dict on THIS probe's own behalf, as if this
+        probe were the confined EXECUTOR returning an artifact to an originator (13):
+        ``node`` = our id and a ``sig`` over ``RESULT_CONTEXT ‖ canonical({id,node,
+        result})`` (the sig-less form), byte-identical to the reference. A keyless
+        probe returns the result UNSIGNED (no sig) — accepted by an originator on the
+        responder-link gate alone, exactly the reference's keyless degradation.
+        Mirrors :meth:`sign_claim`."""
+        with self._lock:
+            node_id = self.info.id
+        if self.key is None:
+            return codec.job_result(job_id, node_id, result)  # keyless: no sig
+        payload = {"id": job_id, "node": node_id, "result": result}
+        sig = self.key.sign(codec.result_signing_bytes(payload))
+        return codec.job_result(job_id, node_id, result, sig)
+
+    def send_result(self, job_id: str, result: dict) -> bool:
+        """Convenience: mint (:meth:`sign_result`) and send a job-result to the
+        candidate over our link. Returns False if the link isn't up yet."""
+        return self.send(self.sign_result(job_id, result))
+
     def _send_raw(self, conn: socket.socket, data: bytes) -> None:
         with self._lock:
             conn.sendall(data)
