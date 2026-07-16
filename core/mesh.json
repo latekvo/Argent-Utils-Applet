@@ -14,7 +14,10 @@
     "peerStaleSecs": 5.0,
     "peerTimeoutSecs": 10.0,
     "dispatchAckTimeoutSecs": 8.0,
-    "stateWriteIntervalSecs": 2.0
+    "stateWriteIntervalSecs": 2.0,
+    "foreignResultRetryIntervalSecs": 5.0,
+    "foreignResultMaxSecs": 120.0,
+    "foreignJobTimeoutSecs": 900.0
   },
 
   "platforms": [

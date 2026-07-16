@@ -32,6 +32,9 @@ _ENV_KEYS = {
     "ARGENT_MESH_TIMEOUT_SECS": "peerTimeoutSecs",
     "ARGENT_MESH_ACK_SECS": "dispatchAckTimeoutSecs",
     "ARGENT_MESH_STATE_SECS": "stateWriteIntervalSecs",
+    "ARGENT_MESH_RESULT_RETRY_SECS": "foreignResultRetryIntervalSecs",
+    "ARGENT_MESH_RESULT_MAX_SECS": "foreignResultMaxSecs",
+    "ARGENT_MESH_FOREIGN_TIMEOUT_SECS": "foreignJobTimeoutSecs",
 }
 
 
@@ -95,6 +98,33 @@ def api_key() -> str:
     API key authenticates who may submit *work* to this (typically server) node,
     without granting mesh membership or device trust. Empty = no API-key gate."""
     return os.environ.get("ARGENT_MESH_API_KEY", "")
+
+
+def foreign_spawn() -> str:
+    """Optional **confinement runner** (ARGENT_MESH_FOREIGN_SPAWN) — the command
+    template a node uses to run a *foreign* SzpontRequest under zero trust. Its
+    presence is what turns a foreign request from **declined** into **confined,
+    response-only execution**: the untrusted ``prompt`` runs inside the operator's
+    own sandbox (a container/VM/jailed process — *the node's own responsibility to
+    isolate*), which the template names, with ``{prompt_file}`` and ``{result_file}``
+    substituted. The node then returns the sandbox's ``{result_file}`` to the
+    originator as a ``job-result``; the originator performs any social action itself.
+
+    Empty (the default) = **no foreign execution**: a foreign request is declined,
+    exactly as before. A node only ever runs a stranger's compute when the operator
+    has explicitly supplied the jail to run it in. See
+    docs/szpontnet/13-foreign-execution.md."""
+    return os.environ.get("ARGENT_MESH_FOREIGN_SPAWN", "")
+
+
+def on_result() -> str:
+    """Optional **result handler** (ARGENT_MESH_ON_RESULT) — the command template an
+    originator runs when a foreign executor returns a ``job-result`` for a request it
+    dispatched. This is where the **social action runs under the originator's own
+    identity** (e.g. ``gh pr review``): ``{result_file}`` holds the executor's
+    computed artifact plus the job metadata. Empty = the originator just records the
+    result (no automatic action). See docs/szpontnet/13-foreign-execution.md."""
+    return os.environ.get("ARGENT_MESH_ON_RESULT", "")
 
 
 def accounts() -> dict:

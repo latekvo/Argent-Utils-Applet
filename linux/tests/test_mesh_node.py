@@ -444,6 +444,72 @@ def test_foreign_device_declined_until_its_key_is_trusted(fleet):
     _wait_file(spawned / "bob.txt", "personal")
 
 
+def test_foreign_request_runs_confined_and_routes_result_back(fleet):
+    """The foreign zero-trust path, end to end over real sockets. Alice is FOREIGN to
+    Bob; she dispatches a review. Bob does NOT decline — with a confinement runner
+    configured he runs the compute SANDBOXED (never the host spawn/`gh` path) and
+    returns the computed artifact as a `job-result`. Alice acks it and performs the
+    social action herself, under her own identity. Proves the whole
+    request → confined-compute → response → ack → originator-acts loop, and that the
+    foreign job never touched Bob's host execution path."""
+    root = fleet.root
+    (root / "acted").mkdir(exist_ok=True)
+    # Bob's sandbox stub stands in for a container/jail: it copies the (preamble-
+    # prefixed) prompt where we can inspect it, then writes a canned review to the
+    # result file the node handed it. In real use this is `docker run …`.
+    bob_confined = root / "spawned" / "bob-confined.txt"
+    foreign_spawn = (f"sh -c 'cp {{prompt_file}} {bob_confined}; "
+                     f"printf REVIEW-BY-BOB > {{result_file}}'")
+    # Alice's result handler is where the social action runs under HER identity (here
+    # a stub that just captures the returned artifact; in real use it runs `gh`).
+    alice_acted = root / "acted" / "alice.json"
+    on_result = f"cp {{result_file}} {alice_acted}"
+    # Fast delivery timers so the response/ack loop resolves within the test window.
+    fast = {"ARGENT_MESH_RESULT_RETRY_SECS": "0.5",
+            "ARGENT_MESH_RESULT_MAX_SECS": "30",
+            "ARGENT_MESH_FOREIGN_TIMEOUT_SECS": "20"}
+
+    fleet.start("aaaa", "alice", "linux", tier=4,
+                extra_env={**fast, "ARGENT_MESH_ON_RESULT": on_result})
+    fleet.start("bbbb", "bob", "macos", tier=1,
+                extra_env={**fast, "ARGENT_MESH_FOREIGN_SPAWN": foreign_spawn})
+    for nid in ("aaaa", "bbbb"):
+        _wait_for(lambda nid=nid: _links_up(fleet.state(nid), 1), what=f"{nid} link")
+
+    # Bob verifies Alice's key, then trusts only himself → Alice is foreign to Bob.
+    _wait_for(lambda: next((p for p in fleet.state("bbbb").get("peers", [])
+                            if p.get("id") == "aaaa" and p.get("verified")), None),
+              what="Bob to verify Alice's device")
+    bob_fp = fleet.state("bbbb")["self"]["fingerprint"]
+    assert fleet.cli("bbbb", "--trust", bob_fp, "--label", "self").returncode == 0
+
+    # Alice dispatches to Bob. Bob accepts (`spawned` — the hand-off ack) and runs it
+    # confined; the artifact comes back asynchronously as a job-result.
+    r = fleet.cli("aaaa", "--dispatch", "review", "--prompt", "please review #123",
+                  "--target", "bbbb")
+    assert r.returncode == 0 and "spawned" in r.stdout, r.stdout + r.stderr
+
+    # 1. Bob ran the compute in the confinement runner, on the response-only prompt.
+    _wait_for(lambda: bob_confined.exists(), what="Bob's confinement runner to run")
+    confined_prompt = bob_confined.read_text()
+    assert "zero-trust execution" in confined_prompt   # the response-only preamble
+    assert "please review #123" in confined_prompt     # the actual request
+
+    # 2. The foreign job NEVER took Bob's host spawn path (that stub writes bob.txt).
+    time.sleep(0.5)
+    assert not (root / "spawned" / "bob.txt").exists(), "foreign job hit the host path!"
+
+    # 3. The result routed back and Alice acted on it under her own identity.
+    _wait_for(lambda: alice_acted.exists(), what="Alice to act on Bob's returned result")
+    payload = json.loads(alice_acted.read_text())
+    assert payload["from"] == "bbbb" and payload["duty"] == "review"
+    assert payload["output"] == "REVIEW-BY-BOB"
+
+    # 4. Reliable delivery: Bob's pending result clears once Alice's ack lands.
+    _wait_for(lambda: fleet.state("bbbb").get("foreign", {}).get("pendingResults") == 0,
+              what="Bob's job-result to be acked and dropped")
+
+
 def test_out_of_tokens_node_refuses_even_a_direct_target(fleet):
     """Refusals are first-class: a dispatcher may forward to whoever it likes,
     and the receiver may refuse. Bob is out of tokens and declines the request

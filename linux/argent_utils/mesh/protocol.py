@@ -19,6 +19,9 @@ Message types (``t``):
 - ``set-attr``  (TCP)  edit a node's local attrs (from a peer's panel or the CLI)
 - ``dispatch``  (TCP)  run a job on the receiving node
 - ``job-status``(TCP)  dispatch outcome: ``spawned`` | ``declined`` | ``failed`` (+ reason)
+- ``job-result``(TCP)  the computed artifact a FOREIGN request returns to its originator
+                       (who then performs any social action itself); re-sent until acked
+- ``job-ack``   (TCP)  the originator's acknowledgement of a ``job-result`` (reliable delivery)
 - ``work-claim``(TCP)  gossiped, self-signed origination lease on a unit of work
 - ``status``    (TCP)  ctl request: reply with one ``state`` message (the snapshot)
 """
@@ -46,6 +49,11 @@ _OVERRIDES_CONTEXT = b"szpontnet-overrides-v1:"
 # same way, under its own tag — so a claim signature can't be lifted onto an
 # advert/override or vice versa. See docs/szpontnet/12-work-claims.md.
 _CLAIM_CONTEXT = b"szpontnet-workclaim-v1:"
+# A `job-result` — the computed artifact a **foreign** SzpontRequest returns to its
+# originator (who then performs any social action itself) — is signed under its own
+# tag so the originator can bind the result to the executor's key. Same canonical
+# construction. See docs/szpontnet/13-foreign-execution.md.
+_RESULT_CONTEXT = b"szpontnet-jobresult-v1:"
 
 
 def _canonical(payload: dict) -> bytes:
@@ -71,6 +79,14 @@ def claim_signing_bytes(claim_dict: dict) -> bytes:
     """The exact bytes a work-claim's `sig` covers (signed by the claimant `node`
     over the record's canonical form)."""
     return _CLAIM_CONTEXT + _canonical(claim_dict)
+
+
+def result_signing_bytes(result_payload: dict) -> bytes:
+    """The exact bytes a `job-result`'s `sig` covers (signed by the executor over
+    the canonical form of ``{"id", "node", "result"}`` — the correlation id, the
+    executor id, and the computed payload). Binds the returned artifact to the
+    executor's key so a relay or a third peer on the link can't forge it."""
+    return _RESULT_CONTEXT + _canonical(result_payload)
 
 
 def _opt_frac(v: object) -> float | None:
@@ -435,6 +451,24 @@ def dispatch(job: Job, api_key: str = "") -> dict:
 def job_status(job_id: str, status: str, reason: str = "", node_id: str = "") -> dict:
     return {"t": "job-status", "id": job_id, "status": status,
             "reason": reason, "node": node_id}
+
+
+def job_result(job_id: str, node_id: str, result: dict, sig: str = "") -> dict:
+    """The computed artifact a **foreign** SzpontRequest returns to its originator.
+    Carried back on the same link the dispatch arrived on, correlated by Job ``id``,
+    re-sent until the originator ``job-ack``s it. ``sig`` (optional, additive) is the
+    executor's signature over [result_signing_bytes]; a keyed executor signs, a
+    keyless one omits it. See docs/szpontnet/13-foreign-execution.md."""
+    msg = {"t": "job-result", "id": job_id, "node": node_id, "result": result}
+    if sig:
+        msg["sig"] = sig
+    return msg
+
+
+def job_ack(job_id: str, node_id: str) -> dict:
+    """The originator's acknowledgement of a [job_result], by Job ``id``. Stops the
+    executor's retry loop; reliable delivery, not fire-and-forget."""
+    return {"t": "job-ack", "id": job_id, "node": node_id}
 
 
 def status_request() -> dict:

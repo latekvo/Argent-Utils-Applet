@@ -12,7 +12,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from argent_utils.mesh import assign, config, crypto, identity, protocol, stats, trust  # noqa: E402
+from dataclasses import replace as _dc_replace  # noqa: E402
+
+from argent_utils.mesh import (  # noqa: E402
+    assign, config, crypto, identity, protocol, spawnjob, stats, trust,
+)
 from argent_utils.mesh.config import Placement, PlacementOverrides  # noqa: E402
 from argent_utils.mesh.protocol import NodeInfo  # noqa: E402
 
@@ -1082,6 +1086,224 @@ def test_keyless_peer_cannot_suppress_even_under_empty_allowlist(tmp_path, monke
         {"workKey": _WK, "node": "a-peer", "state": "active", "epoch": 1.0, "seq": 0}))
     assert node._claim_holder(_WK) is None                            # unbound → not authoritative
     assert node.claim(_WK) is True                                    # we still originate
+
+
+# MARK: - foreign zero-trust execution (confined compute + response-back)
+
+
+_RESULT = {"ok": True, "duty": "review", "output": "LGTM — ship it", "error": ""}
+
+
+class _RecWriter:
+    """A StreamWriter stand-in that records every message written to it, so a test
+    can assert which job-result/job-ack lines a node emitted on a link."""
+    def __init__(self):
+        self.sent: list[dict] = []
+
+    def write(self, payload):
+        msg = protocol.decode(payload)
+        if msg is not None:
+            self.sent.append(msg)
+
+    async def drain(self):
+        pass
+
+    def close(self, *a):
+        pass
+
+    def of(self, t: str) -> list[dict]:
+        return [m for m in self.sent if m.get("t") == t]
+
+
+def _signed_result(key, job_id, node_id, result=None) -> dict:
+    """A `job-result` message signed by ``key`` over its canonical {id,node,result}."""
+    result = _RESULT if result is None else result
+    sig = key.sign(protocol.result_signing_bytes(
+        {"id": job_id, "node": node_id, "result": result})) if key else ""
+    return protocol.job_result(job_id, node_id, result, sig)
+
+
+def _link_peer(node, node_id, key):
+    """Learn ``node_id`` as a LIVE, verified, pinned peer holding ``key`` on a
+    recording writer, and return (peer, writer). Clears the writer's link-setup
+    chatter so a test sees only what it triggers afterwards."""
+    w = _RecWriter()
+    node._learn_node(_peer_info(node_id, 1, pubkey=key.public_b64), "1.2.3.4",
+                     w, raw=_signed_advert(key, node_id))
+    node.peers[node_id].verified_fp = key.fingerprint
+    w.sent.clear()
+    return node.peers[node_id], w
+
+
+def _job(duty="review", job_id="j1") -> protocol.Job:
+    return protocol.Job(id=job_id, duty=duty, prompt="do it",
+                        requested_by="somebody", requested_at=1.0)
+
+
+def test_result_signature_binds_to_executor(tmp_path, monkeypatch):
+    """A job-result is authentic only when a keyed executor signed it over its exact
+    {id,node,result}; keyless is accepted (still link-gated), keyed-but-forged is not."""
+    if not crypto.AVAILABLE:
+        return
+    node = _fresh_node(tmp_path, monkeypatch)
+    k = _mk_key()
+    peer, _w = _link_peer(node, "bob", k)
+    assert node._result_authentic(_signed_result(k, "j1", "bob"), peer)      # valid
+    unsigned = _signed_result(k, "j1", "bob"); del unsigned["sig"]
+    assert not node._result_authentic(unsigned, peer)                        # keyed, unsigned
+    tampered = _signed_result(k, "j1", "bob")
+    tampered["result"] = {**_RESULT, "output": "rm -rf /"}                    # payload swapped
+    assert not node._result_authentic(tampered, peer)
+    forged = _signed_result(_mk_key(), "j1", "bob")                          # someone else's sig
+    assert not node._result_authentic(forged, peer)
+    # A keyless executor (peer advertises no pubkey) has nothing to verify → accepted.
+    node._learn_node(_peer_info("carol", 1), "1.2.3.4", _FakeWriter())
+    assert node._result_authentic(
+        {"id": "j2", "node": "carol", "result": _RESULT}, node.peers["carol"])
+
+
+def test_admit_confines_foreign_only_with_a_runner(tmp_path, monkeypatch):
+    """The mode a request runs in: personal → run on host; foreign → confined iff a
+    confinement runner is configured, else declined; duty/token refusals win first."""
+    node = _fresh_node(tmp_path, monkeypatch)
+    monkeypatch.delenv("ARGENT_MESH_FOREIGN_SPAWN", raising=False)
+    assert node._admit(_job(), "personal") == ("run", "")
+    # Foreign with no runner → the safe v1 decline.
+    mode, reason = node._admit(_job(), "foreign")
+    assert mode == "decline" and "foreign device" in reason
+    # Foreign with a runner configured → confined, response-only.
+    monkeypatch.setenv("ARGENT_MESH_FOREIGN_SPAWN", "sandbox {prompt_file} {result_file}")
+    assert node._admit(_job(), "foreign") == ("confined", "")
+    # Duty/token refusals apply regardless of trust and take precedence.
+    node.local = _dc_replace(node.local, duties_enabled={"review": False})
+    assert node._admit(_job(), "foreign")[0] == "decline"
+    node.local = _dc_replace(node.local, duties_enabled={})
+    monkeypatch.setattr(node, "current_tokens", lambda: "out")
+    assert node._admit(_job(), "foreign") == ("decline", "out of tokens")
+
+
+def test_run_confined_needs_a_requester_link(tmp_path, monkeypatch):
+    """Response-only is meaningless with nobody to answer: a confined run without a
+    verified requester fails outright rather than running a stranger's code for no one."""
+    node = _fresh_node(tmp_path, monkeypatch)
+    monkeypatch.setenv("ARGENT_MESH_FOREIGN_SPAWN", "sandbox {prompt_file} {result_file}")
+    assert node._run_confined(_job(), requester_id="")[0] == "failed"
+
+
+def test_emit_result_retries_until_acked_by_the_owed_node(tmp_path, monkeypatch):
+    """An executor's job-result is re-sent on demand until the node it's owed to acks
+    it; an ack from any OTHER node is ignored, and a passed deadline drops it."""
+    if not crypto.AVAILABLE:
+        return
+    import time as _time
+    node = _fresh_node(tmp_path, monkeypatch)
+    alice, aw = _link_peer(node, "alice", _mk_key())
+    other, ow = _link_peer(node, "mallory", _mk_key())
+    node._emit_result("j1", "alice", _RESULT)
+    assert len(aw.of("job-result")) == 1 and "j1" in node._pending_results
+    # A retry re-sends on the owed link once the retry time is reached.
+    node._pending_results["j1"].next_retry = _time.monotonic() - 1
+    node._retry_pending_results()
+    assert len(aw.of("job-result")) == 2
+    # An ack from the WRONG node doesn't clear it.
+    node._on_job_ack(protocol.job_ack("j1", "mallory"), ow)
+    assert "j1" in node._pending_results
+    # The ack from the owed node clears it → no more retries.
+    node._on_job_ack(protocol.job_ack("j1", "alice"), aw)
+    assert "j1" not in node._pending_results
+    # A pending whose deadline passed is dropped on the tick.
+    node._emit_result("j2", "alice", _RESULT)
+    node._pending_results["j2"].deadline = _time.monotonic() - 1
+    node._retry_pending_results()
+    assert "j2" not in node._pending_results
+
+
+def test_originator_acks_and_acts_exactly_once(tmp_path, monkeypatch):
+    """On a correlated, authentic result the originator acks and performs the social
+    action once; a duplicate (executor retried) is re-acked but never acted on twice."""
+    if not crypto.AVAILABLE:
+        return
+    acted = []
+    monkeypatch.setattr(spawnjob, "run_result_handler", lambda p: acted.append(p))
+    node = _fresh_node(tmp_path, monkeypatch)
+    k = _mk_key()
+    bob, bw = _link_peer(node, "bob", k)
+    node._register_awaiting("j1", "bob", "review")
+    msg = _signed_result(k, "j1", "bob")
+    node._on_job_result(msg, bw)
+    assert len(bw.of("job-ack")) == 1                       # acked
+    assert len(acted) == 1                                  # acted once
+    assert "j1" in node._acted_results and "j1" not in node._awaiting_result
+    # Duplicate delivery: re-acked (executor is still retrying) but NOT re-acted.
+    node._on_job_result(msg, bw)
+    assert len(bw.of("job-ack")) == 2 and len(acted) == 1
+
+
+def test_foreign_result_dropped_from_wrong_link_or_when_forged(tmp_path, monkeypatch):
+    """A result is honored only from the exact executor the job went to and only when
+    authentic; a wrong-link, forged, or unsolicited result is dropped without an ack."""
+    if not crypto.AVAILABLE:
+        return
+    acted = []
+    monkeypatch.setattr(spawnjob, "run_result_handler", lambda p: acted.append(p))
+    node = _fresh_node(tmp_path, monkeypatch)
+    kb, kc = _mk_key(), _mk_key()
+    bob, bw = _link_peer(node, "bob", kb)
+    charlie, cw = _link_peer(node, "charlie", kc)
+    node._register_awaiting("j1", "bob", "review")
+    # Delivered on the wrong peer's link (charlie relaying bob's job id) → dropped.
+    node._on_job_result(_signed_result(kb, "j1", "bob"), cw)
+    assert not cw.of("job-ack") and not acted and "j1" in node._awaiting_result
+    # Forged: right link, but signed by a different key → dropped, not acked.
+    node._on_job_result(_signed_result(kc, "j1", "bob"), bw)
+    assert not bw.of("job-ack") and not acted
+    # Unsolicited: a result for a job we never dispatched → dropped.
+    node._on_job_result(_signed_result(kb, "unknown", "bob"), bw)
+    assert not bw.of("job-ack") and not acted
+
+
+def test_confined_env_is_scrubbed_of_host_credentials(monkeypatch):
+    """The confined child must never inherit the host's credentials — that is what
+    programmatically prevents a foreign agent from acting as us (using `gh`, cloud
+    APIs, the mesh secret). Benign config survives; explicit overlays are applied."""
+    creds = ("GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY",
+             "AWS_SECRET_ACCESS_KEY", "MY_SSH_KEY", "ARGENT_MESH_SECRET",
+             "ARGENT_MESH_API_KEY")
+    for k in creds:
+        monkeypatch.setenv(k, "SEKRIT")
+    monkeypatch.setenv("PATH", "/usr/bin")            # benign — must survive
+    monkeypatch.setenv("ARGENT_MESH_DIR", "/m")       # benign — must survive
+    env = spawnjob._scrubbed_env(ARGENT_MESH_RESULT_FILE="/r")
+    assert env["PATH"] == "/usr/bin" and env["ARGENT_MESH_DIR"] == "/m"
+    assert env["ARGENT_MESH_RESULT_FILE"] == "/r"     # overlay applied
+    for k in creds:
+        assert k not in env, f"credential {k} leaked into the confined child"
+
+
+def test_fill_substitutes_tokens_and_quotes():
+    """The command template substitutes {prompt_file}/{result_file} with shell-quoted
+    values, and appends the prompt path when the template omits the token (the
+    back-compat shape ARGENT_MESH_SPAWN has always accepted)."""
+    assert spawnjob._fill("run {prompt_file} {result_file}",
+                          prompt_file="/a b", result_file="/c") == "run '/a b' /c"
+    assert spawnjob._fill("run", prompt_file="/p") == "run /p"
+
+
+def test_foreign_registries_expire_and_are_capped(tmp_path, monkeypatch):
+    """The originator's awaited/acted bookkeeping is bounded and self-expiring, so a
+    flood or a never-returning executor can't grow memory without bound."""
+    import time as _time
+    from argent_utils.mesh import node as node_mod
+    node = _fresh_node(tmp_path, monkeypatch)
+    monkeypatch.setattr(node_mod, "_MAX_FOREIGN", 3)
+    for i in range(5):
+        node._register_awaiting(f"j{i}", "bob", "review")
+    assert len(node._awaiting_result) == 3 and "j0" not in node._awaiting_result
+    # TTL reap: an entry older than the compute+delivery window is dropped.
+    node._awaiting_result["j4"] = ("bob", "review", _time.monotonic() - 10**9)
+    node._acted_results["old"] = _time.monotonic() - 10**9
+    node._reap_foreign()
+    assert "j4" not in node._awaiting_result and "old" not in node._acted_results
 
 
 # MARK: - redial from memory (peer-address cache + beacon-outage surfacing)

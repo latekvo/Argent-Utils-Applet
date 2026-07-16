@@ -30,13 +30,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import secrets
 import socket
 import struct
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from .. import activity
 from . import (
@@ -62,6 +63,18 @@ _MAX_PEERS = 256
 # handful of in-flight work items; this only stops a gossip flood of spoofed
 # work_keys from ballooning the claim book without bound. See _store_claim.
 _MAX_CLAIMS = 4096
+
+# Upper bounds on the foreign request/response bookkeeping (executor's unacked
+# results, originator's awaited results + already-acted job ids). Real use holds a
+# few in-flight foreign jobs; these just stop a flood from growing memory without
+# bound. See the foreign-execution section. Entries also expire on their own
+# deadline, so the caps are a backstop, not the primary reclaim.
+_MAX_FOREIGN = 1024
+
+# A confined job's returned artifact travels inside a single `job-result` NDJSON
+# line, so cap it well under the wire line limit (MAX_LINE_BYTES, 512 KiB) — the
+# JSON envelope + escaping needs headroom. A larger artifact is truncated.
+_MAX_RESULT_BYTES = 400 * 1024
 
 # Domain-separation prefix for the trust proof-of-possession signature. The peer
 # signs this tag + the challenge nonce, never the bare nonce — so a captured
@@ -99,6 +112,21 @@ def _own_addresses() -> set[str]:
     except OSError:
         pass
     return addrs
+
+
+@dataclass
+class _PendingResult:
+    """An executor's unacked ``job-result`` owed to a foreign requester. Held until
+    the originator ``job-ack``s it or the deadline passes, and re-emitted on the
+    heartbeat tick — reliable delivery, not fire-and-forget. ``msg`` is the fully
+    built (signed) job-result dict, re-sent verbatim each retry; ``to_node`` is the
+    originator whose link we send it on (looked up fresh each time so a flapped link
+    heals)."""
+
+    msg: dict
+    to_node: str
+    next_retry: float  # monotonic; re-emit when reached
+    deadline: float    # monotonic; give up (originator presumed gone) past this
 
 
 class Peer:
@@ -195,6 +223,19 @@ class MeshNode:
         # node was originating, so a caller (e.g. an auto-poller) can abort the
         # local work it started. None = no-op (the default; origination is manual).
         self.on_claim_lost: Callable[[str], None] | None = None
+        # Foreign zero-trust request/response bookkeeping (docs/szpontnet/13):
+        #  - as EXECUTOR: results we computed for a foreign requester and owe back to
+        #    it, keyed by job id, re-emitted until job-ack'd (reliable delivery);
+        #  - as ORIGINATOR: remote dispatches we're still willing to receive a
+        #    job-result for (job id → (executor id, duty, added_monotonic)), and the
+        #    job ids we've already acted on, so a retried result is re-acked but never
+        #    acted on twice (idempotent). Both expire by time and are capped.
+        self._pending_results: dict[str, _PendingResult] = {}
+        self._awaiting_result: dict[str, tuple[str, str, float]] = {}
+        self._acted_results: dict[str, float] = {}
+        # Strong refs to the per-job confined-result watcher coroutines, so the loop
+        # can't GC one mid-wait (the asyncio create_task footgun).
+        self._result_tasks: set[asyncio.Task] = set()
 
     # MARK: - identity / gossip source of truth
 
@@ -820,6 +861,17 @@ class MeshNode:
         if t == "job-status":
             self._resolve_job_future(msg, writer)
             return None
+        if t == "job-result":
+            # A foreign executor returned the artifact we dispatched to it. Ack it and
+            # perform the social action ourselves — the executor never acts as us.
+            self._on_job_result(msg, writer)
+            peer = self._peer_by_writer(writer)
+            return peer.info.id if peer else None
+        if t == "job-ack":
+            # Our foreign requester acknowledged a result — stop re-sending it.
+            self._on_job_ack(msg, writer)
+            peer = self._peer_by_writer(writer)
+            return peer.info.id if peer else None
         if t == "work-claim":
             # A gossiped origination lease. Authenticate it, merge by freshness,
             # relay it, and yield our own claim if a better peer now owns the key.
@@ -1028,6 +1080,10 @@ class MeshNode:
                 elif self._reapable(peer, now):
                     del self.peers[pid]  # long dead / stale phantom — drop it
                     self._forget_claims(pid)  # its origination leases lapse with it
+            # Reliable foreign-result delivery + expiry ride the same tick: re-send
+            # any unacked job-result whose retry is due, and reap stale bookkeeping.
+            self._retry_pending_results()
+            self._reap_foreign()
 
     def _reapable(self, peer: "Peer", now: float) -> bool:
         """Whether an *unlinked* peer should be dropped from the snapshot: a peer
@@ -1431,6 +1487,12 @@ class MeshNode:
         peer = self.peers.get(node_id)
         if peer is None or not peer.linked:
             return "failed", "no link"
+        # Remember this remote dispatch so that if the executor turns out to be a
+        # zero-trust node — running our request confined and returning the artifact
+        # rather than acting on it — we recognize its later `job-result` and act on
+        # it ourselves. Harmless for a personal executor that never responds: the
+        # entry just expires. (docs/szpontnet/13)
+        self._register_awaiting(job.id, node_id, duty_id)
         fut: asyncio.Future = asyncio.get_running_loop().create_future()
         self._job_futures[job.id] = (fut, node_id)
         try:
@@ -1459,46 +1521,61 @@ class MeshNode:
             return
         fut.set_result(msg)
 
-    def _admit(self, job: Job, trust_level: str) -> tuple[bool, str]:
-        """Refusal policy — the receiving node's own call, no consensus needed.
-        A declined job fails the dispatcher's slot over exactly like a dead one.
+    def _admit(self, job: Job, trust_level: str) -> tuple[str, str]:
+        """Refusal / execution-mode policy — the receiving node's own call, no
+        consensus needed. Returns ``(mode, reason)`` where ``mode`` is one of:
+
+        - ``"run"`` — execute **directly** on the host (a **personal** requester,
+          full trust: the work may take social actions under our identity);
+        - ``"confined"`` — the requester is **foreign** but we have a confinement
+          runner configured, so we run the compute **sandboxed and response-only**
+          and return the result for the requester to act on
+          ([_run_confined], docs/szpontnet/13);
+        - ``"decline"`` — refuse (the dispatcher fails the slot over like a dead
+          node): a **foreign** requester with **no** confinement runner (the safe
+          v1 default), a **disabled** duty, or being **out of tokens**.
 
         ``trust_level`` is the requester's classification from the **verified
-        link** ([_peer_trust]) — never from anything in the job, which is
-        spoofable. v1 refuses when:
-        - the requester's device is **foreign** (its proven key isn't in our
-          allowlist, or it proved no key). The zero-trust path — run the compute
-          but route any social action back through a personal node — is not built
-          yet, so we decline rather than act on a stranger's behalf.
-        - we have this duty **disabled** locally (opted out of the class of work).
-        - we are **out of tokens** (can't serve — this is Bob refusing the job
-          Alice sent anyway, which the protocol expressly allows).
-        """
-        if trust_level == "foreign":
-            return False, "foreign device (zero-trust path not implemented)"
+        link** ([_peer_trust]) — never from anything in the job, which is spoofable.
+        Duty/token refusals apply regardless of trust: a node that can't serve the
+        work declines it outright rather than sandboxing it."""
         if not self.local.duty_enabled(job.duty):
-            return False, f"duty {job.duty} disabled here"
+            return "decline", f"duty {job.duty} disabled here"
         if self.current_tokens() == "out":
-            return False, "out of tokens"
-        return True, ""
+            return "decline", "out of tokens"
+        if trust_level == "foreign":
+            if config.foreign_spawn():
+                return "confined", ""
+            return "decline", "foreign device (zero-trust path not implemented)"
+        return "run", ""
 
-    def _run_local_request(self, job: Job, trust_level: str) -> tuple[str, str]:
-        """Admit-or-decline, then run locally. Shared by the remote-receive path
-        (``_take_job``) and a local/self dispatch, so both apply the same policy."""
-        admit, reason = self._admit(job, trust_level)
-        if not admit:
+    def _run_local_request(self, job: Job, trust_level: str,
+                           requester_id: str = "") -> tuple[str, str]:
+        """Admit-or-decline, then run. Shared by the remote-receive path
+        (``_take_job``) and a local/self dispatch, so both apply the same policy.
+        A ``"confined"`` admission (foreign, zero-trust) runs sandboxed and routes
+        its result back to ``requester_id``; the personal/self path never confines
+        (``requester_id`` unused there)."""
+        mode, reason = self._admit(job, trust_level)
+        if mode == "decline":
             activity.log("mesh", "mesh-dispatch-failed",
                          f"Mesh: declined {job.duty} from "
                          f"{self._node_name(job.requested_by)} — {reason}")
             return "declined", reason
+        if mode == "confined":
+            return self._run_confined(job, requester_id)
         return self._spawn_local(job)
 
     def _take_job(self, job: Job, writer: asyncio.StreamWriter) -> None:
         """A peer asked us to run a SzpontRequest. Classify the requester from the
         VERIFIED link (not the job's self-reported requestedBy), admit-or-decline,
-        and answer with the outcome so the dispatcher can act on it."""
-        trust_level = self._peer_trust(self._peer_by_writer(writer))
-        status, out_reason = self._run_local_request(job, trust_level)
+        and answer with the outcome so the dispatcher can act on it. The result of a
+        *confined* (foreign) job is delivered later as a ``job-result``; the
+        ``spawned`` here is only the hand-off ack."""
+        peer = self._peer_by_writer(writer)
+        trust_level = self._peer_trust(peer)
+        status, out_reason = self._run_local_request(
+            job, trust_level, requester_id=peer.info.id if peer else "")
         with contextlib.suppress(ConnectionError, OSError):
             writer.write(protocol.encode(
                 protocol.job_status(job.id, status, out_reason, self.local.id)
@@ -1521,6 +1598,236 @@ class MeshNode:
         activity.log("mesh", "mesh-spawn",
                      f"Mesh: running {job.duty} (from {self._node_name(job.requested_by)})")
         return "spawned", ""
+
+    # MARK: - foreign zero-trust execution (confined compute + response-back)
+    #
+    # A foreign (untrusted) SzpontRequest is never run on the host. When a
+    # confinement runner is configured ([config.foreign_spawn]) we run the compute
+    # SANDBOXED and RESPONSE-ONLY: the sandbox writes its artifact to a result file,
+    # which we return to the originator as a signed `job-result` (re-sent until
+    # `job-ack`d — reliable delivery). The ORIGINATOR then performs any social action
+    # itself, under its own identity. This realizes the normative foreign-execution
+    # security contract (docs/szpontnet/11 + the full flow in docs/szpontnet/13):
+    # sandboxed compute, no host-identity action here, request-in / response-out.
+
+    def _result_path(self, job_id: str, incoming: bool = False):
+        """Where a confined job's artifact is staged: ``out-*`` is what our sandbox
+        writes and we return; ``in-*`` is what we hand our own result handler when a
+        foreign executor returns to us. Under the per-node mesh dir (isolated)."""
+        d = identity.mesh_dir() / "results"
+        d.mkdir(parents=True, exist_ok=True)
+        return d / (f"in-{job_id}.json" if incoming else f"out-{job_id}.json")
+
+    def _run_confined(self, job: Job, requester_id: str) -> tuple[str, str]:
+        """Run a foreign request under zero trust: launch the confinement runner on
+        the (untrusted) prompt, book usage, and start watching for its result file to
+        return to ``requester_id``. Returns the hand-off ``spawned``/``failed`` — the
+        actual artifact is delivered later as a `job-result`."""
+        if not requester_id:
+            # No verified requester link to return the result to — we can't honor
+            # response-only, so decline rather than run a stranger's code for nobody.
+            return "failed", "no verified requester for confined result"
+        result_path = self._result_path(job.id)
+        try:
+            spawnjob.spawn_confined(job.prompt, str(result_path))
+        except spawnjob.JobSpawnError as exc:
+            activity.log("mesh", "spawn-failed",
+                         f"Mesh confined {job.duty} failed here: {exc}")
+            return "failed", str(exc)
+        self._record_usage(config.job_cost_units())
+        task = asyncio.get_running_loop().create_task(
+            self._await_confined_result(job, requester_id, result_path))
+        self._result_tasks.add(task)
+        task.add_done_callback(self._result_tasks.discard)
+        activity.log("mesh", "mesh-spawn",
+                     f"Mesh: running {job.duty} CONFINED for foreign "
+                     f"{self._node_name(requester_id)} (result routes back)")
+        return "spawned", ""
+
+    async def _await_confined_result(self, job: Job, requester_id: str,
+                                     result_path) -> None:
+        """Poll for the sandbox's result file, then return it to the requester. On
+        timeout, return an explicit failure result so the requester isn't left
+        hanging. Runs as a background task per confined job."""
+        poll = max(0.1, float(self.proto["heartbeatIntervalSecs"]))
+        deadline = time.monotonic() + float(self.proto["foreignJobTimeoutSecs"])
+        while time.monotonic() < deadline:
+            with contextlib.suppress(OSError):
+                if result_path.exists() and result_path.stat().st_size > 0:
+                    output = await asyncio.to_thread(self._read_result_file, result_path)
+                    self._emit_result(job.id, requester_id, {
+                        "ok": True, "duty": job.duty, "output": output, "error": ""})
+                    return
+            await asyncio.sleep(poll)
+        activity.log("mesh", "mesh-dispatch-failed",
+                     f"Mesh: confined {job.duty} timed out, returning failure")
+        self._emit_result(job.id, requester_id, {
+            "ok": False, "duty": job.duty, "output": "",
+            "error": "confined execution timed out"})
+
+    @staticmethod
+    def _read_result_file(path) -> str:
+        """Read a confined artifact as text, truncated to the wire cap."""
+        raw = path.read_bytes()
+        if len(raw) > _MAX_RESULT_BYTES:
+            raw = raw[:_MAX_RESULT_BYTES]
+        return raw.decode("utf-8", errors="replace")
+
+    def _sign_result(self, job_id: str, result_payload: dict) -> str:
+        """Sign a job-result over its canonical bytes so the originator can bind the
+        artifact to our key. Keyless node returns '' (accepted unsigned by peers)."""
+        if self.key is None:
+            return ""
+        payload = {"id": job_id, "node": self.local.id, "result": result_payload}
+        return self.key.sign(protocol.result_signing_bytes(payload))
+
+    def _emit_result(self, job_id: str, to_node: str, result_payload: dict) -> None:
+        """Build + sign the job-result and register it for reliable delivery to
+        ``to_node``, sending the first copy now. Retried on the heartbeat tick until
+        acked or its deadline (docs/szpontnet/13)."""
+        sig = self._sign_result(job_id, result_payload)
+        msg = protocol.job_result(job_id, self.local.id, result_payload, sig)
+        now = time.monotonic()
+        if (job_id not in self._pending_results
+                and len(self._pending_results) >= _MAX_FOREIGN):
+            oldest = min(self._pending_results,
+                         key=lambda k: self._pending_results[k].deadline)
+            self._pending_results.pop(oldest, None)
+        self._pending_results[job_id] = _PendingResult(
+            msg=msg, to_node=to_node, next_retry=now,
+            deadline=now + float(self.proto["foreignResultMaxSecs"]))
+        self._send_pending(job_id)
+
+    def _send_pending(self, job_id: str) -> None:
+        """Send (or re-send) a pending result on the requester's current link, and
+        schedule the next retry. The link is looked up fresh so a flapped-and-healed
+        link resumes delivery."""
+        pending = self._pending_results.get(job_id)
+        if pending is None:
+            return
+        peer = self.peers.get(pending.to_node)
+        if peer is not None and peer.linked:
+            with contextlib.suppress(ConnectionError, OSError):
+                peer.writer.write(protocol.encode(pending.msg))
+        pending.next_retry = (time.monotonic()
+                              + float(self.proto["foreignResultRetryIntervalSecs"]))
+
+    def _retry_pending_results(self) -> None:
+        """Heartbeat-tick maintenance: re-send any due unacked result, and drop one
+        whose deadline passed (the requester never acked — presumed gone)."""
+        now = time.monotonic()
+        for job_id, pending in list(self._pending_results.items()):
+            if now >= pending.deadline:
+                del self._pending_results[job_id]
+                activity.log("mesh", "mesh-dispatch-failed",
+                             f"Mesh: gave up delivering job-result {job_id[:8]} (unacked)")
+            elif now >= pending.next_retry:
+                self._send_pending(job_id)
+
+    def _on_job_ack(self, msg: dict, writer: asyncio.StreamWriter) -> None:
+        """A requester acknowledged a result we owed it — stop re-sending. Only the
+        node we actually owe the result to may ack it (verified from the link)."""
+        job_id = str(msg.get("id", ""))
+        pending = self._pending_results.get(job_id)
+        if pending is None:
+            return
+        peer = self._peer_by_writer(writer)
+        if peer is None or peer.info.id != pending.to_node:
+            return
+        del self._pending_results[job_id]
+
+    def _register_awaiting(self, job_id: str, node_id: str, duty: str) -> None:
+        """Record a remote dispatch we'll accept a later ``job-result`` for."""
+        if (job_id not in self._awaiting_result
+                and len(self._awaiting_result) >= _MAX_FOREIGN):
+            oldest = min(self._awaiting_result,
+                         key=lambda k: self._awaiting_result[k][2])
+            self._awaiting_result.pop(oldest, None)
+        self._awaiting_result[job_id] = (node_id, duty, time.monotonic())
+
+    def _result_authentic(self, msg: dict, peer: Peer) -> bool:
+        """Whether a returned result is bound to the executor's key. A **keyed**
+        executor MUST carry a `sig` verifying over the canonical `{id,node,result}`
+        (so a third peer on the link — or a tamper in flight — can't forge it); a
+        **keyless** executor carries none (accepted, still gated by the responder-link
+        check in [_on_job_result])."""
+        pubkey = peer.info.pubkey
+        if not pubkey:
+            return True
+        sig = str(msg.get("sig", ""))
+        payload = {"id": str(msg.get("id", "")), "node": str(msg.get("node", "")),
+                   "result": msg.get("result")}
+        return bool(sig) and crypto.verify(
+            pubkey, protocol.result_signing_bytes(payload), sig)
+
+    def _ack_result(self, job_id: str, writer: asyncio.StreamWriter) -> None:
+        with contextlib.suppress(ConnectionError, OSError):
+            writer.write(protocol.encode(protocol.job_ack(job_id, self.local.id)))
+
+    def _on_job_result(self, msg: dict, writer: asyncio.StreamWriter) -> None:
+        """A foreign executor returned the artifact for a request we dispatched to
+        it. Verify it's genuinely from that executor, ack it, and perform the social
+        action ourselves — exactly once, under our own identity. A duplicate (the
+        executor retried before our ack landed) is re-acked but never re-acted."""
+        job_id = str(msg.get("id", ""))
+        entry = self._awaiting_result.get(job_id)
+        if entry is None:
+            # Not an outstanding dispatch. If we already acted on it, re-ack so the
+            # executor stops retrying; otherwise it's unsolicited — drop it.
+            if job_id in self._acted_results:
+                self._ack_result(job_id, writer)
+            return
+        executor_id, duty, _added = entry
+        peer = self._peer_by_writer(writer)
+        if peer is None or peer.info.id != executor_id:
+            return  # only the node we dispatched to may return its result
+        if not self._result_authentic(msg, peer):
+            return  # forged/tampered result — drop, do NOT ack
+        # Ack first (idempotent): stop the executor's retries whether this is the
+        # first delivery or a duplicate.
+        self._ack_result(job_id, writer)
+        if job_id in self._acted_results:
+            return  # already performed the action — never twice
+        self._acted_results[job_id] = time.monotonic()
+        self._awaiting_result.pop(job_id, None)
+        self._act_on_result(job_id, executor_id, duty, msg.get("result") or {})
+
+    def _act_on_result(self, job_id: str, executor_id: str, duty: str,
+                       result: dict) -> None:
+        """Perform the social action for a returned foreign result under OUR identity
+        (the reference hands it to ``ARGENT_MESH_ON_RESULT``, where e.g. `gh` runs).
+        A failed compute is logged, not acted on."""
+        if not bool(result.get("ok", False)):
+            activity.log("mesh", "mesh-dispatch-failed",
+                         f"Mesh: {duty} from {self._node_name(executor_id)} returned "
+                         f"no result ({result.get('error') or 'failed'})")
+            return
+        path = self._result_path(job_id, incoming=True)
+        try:
+            path.write_text(json.dumps({
+                "jobId": job_id, "duty": duty, "from": executor_id,
+                "output": str(result.get("output", ""))}), encoding="utf-8")
+            spawnjob.run_result_handler(str(path))
+        except (OSError, spawnjob.JobSpawnError) as exc:
+            activity.log("mesh", "spawn-failed",
+                         f"Mesh: result handler for {duty} failed: {exc}")
+            return
+        activity.log("mesh", "mesh-spawn",
+                     f"Mesh: acting on {duty} result from "
+                     f"{self._node_name(executor_id)} (under our identity)")
+
+    def _reap_foreign(self) -> None:
+        """Expire stale foreign bookkeeping. An awaited result may take the whole
+        confined compute budget plus the delivery window to arrive, so its TTL spans
+        both; an acted-on id only needs to outlive the executor's retry window."""
+        now = time.monotonic()
+        await_ttl = (float(self.proto["foreignJobTimeoutSecs"])
+                     + float(self.proto["foreignResultMaxSecs"]))
+        acted_ttl = float(self.proto["foreignResultMaxSecs"])
+        self._awaiting_result = {k: v for k, v in self._awaiting_result.items()
+                                 if now - v[2] < await_ttl}
+        self._acted_results = {k: t for k, t in self._acted_results.items()
+                               if now - t < acted_ttl}
 
     # MARK: - control sessions (panel / CLI)
 
@@ -1664,6 +1971,11 @@ class MeshNode:
             # owning node id (the lowest-id live+personal active claimant). Lets a
             # UI/CLI show what work is already spoken for. Only owned keys appear.
             "claims": self._claim_owners(),
+            # Foreign zero-trust request/response in flight (docs/szpontnet/13):
+            # results we've computed and owe back to a foreign requester (unacked),
+            # and remote dispatches we're still willing to receive a result for.
+            "foreign": {"pendingResults": len(self._pending_results),
+                        "awaiting": len(self._awaiting_result)},
         }
 
     async def _snapshot_loop(self) -> None:
