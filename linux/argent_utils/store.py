@@ -448,9 +448,10 @@ class Store(QObject):
 
         # Fields that tick/drift every write on their own — dropping them keeps an
         # idle mesh from firing a rebuild (which tears down an open combo the user is
-        # editing) twice a second. Link state (up/stale/down) and the token STATE
-        # still live in the peer dict, so genuine transitions still repaint; only the
-        # continuously-moving numbers (uptime, quota %) are ignored.
+        # editing) twice a second. Link state (up/stale/down), the token STATE, and
+        # the real session/week quota percentages (integer-grained, move ~1/min at
+        # most) still live in the node dicts, so genuine transitions repaint; only
+        # the continuously-moving numbers (uptime, raw quota fraction) are ignored.
         _tick_top = ("updatedAt", "pid")
         _tick_node = ("lastSeenSecsAgo", "uptimeSecs", "tokensPct")
 

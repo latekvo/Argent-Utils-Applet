@@ -137,10 +137,13 @@ class MeshNode:
         self.platform = identity.detect_platform()
         self.epoch = time.time()
         # Cached automatic token-budget read (refreshed on a throttle, so neither the
-        # hot `info` path nor the 2s snapshot tick touches the filesystem). See
-        # _refresh_tokens / _TOKEN_REFRESH_SECS.
+        # hot `info` path nor the 2s snapshot tick touches the filesystem/network).
+        # See _refresh_tokens / _TOKEN_REFRESH_SECS. session/week are the REAL
+        # remaining fractions per rate-limit window (None on the heuristic fallback).
         self._token_state = "ok"
         self._token_frac = 1.0
+        self._token_session: float | None = None
+        self._token_week: float | None = None
         self._last_token_refresh = 0.0  # monotonic; 0 => refresh on the first tick
         self.tcp_port = 0  # bound in start()
         self.peers: dict[str, Peer] = {}
@@ -190,6 +193,8 @@ class MeshNode:
             strength_auto=self.local.strength_auto,
             tokens_auto=(self.local.tokens == "auto"),
             tokens_pct=self._token_frac,
+            tokens_session_pct=self._token_session,
+            tokens_week_pct=self._token_week,
             tcp_port=self.tcp_port,
             epoch=self.epoch,
             seq=self._seq,
@@ -220,17 +225,30 @@ class MeshNode:
         override = self.local.tokens
         return override if override in ("ok", "low", "out") else self._token_state
 
-    def _refresh_tokens(self) -> bool:
-        """Re-read real local usage and recompute the auto token state + remaining
-        fraction. Returns True when the EFFECTIVE state changed (so the caller can
-        re-gossip). Cheap: usage.window_tokens only opens files touched in-window."""
-        before = self.current_tokens()
+    def _gossiped_tokens(self) -> tuple:
+        """What peers currently know of our token budget, at wire granularity —
+        the change-detection key for re-gossiping."""
+        def r(v: float | None) -> float | None:
+            return None if v is None else round(v, 2)
+        return (self.current_tokens(), r(self._token_frac),
+                r(self._token_session), r(self._token_week))
+
+    async def _refresh_tokens(self) -> bool:
+        """Re-probe the token budget (real quota endpoint, else local-log heuristic)
+        and recompute the auto state + remaining fractions. Returns True when what
+        peers see changed — the state flipped or a percentage moved — so the caller
+        can re-gossip. Runs the probe in a worker thread: it may touch the network
+        (~1s, worst case a few seconds' timeout) and must not stall the event loop."""
+        before = self._gossiped_tokens()
         try:
-            state, frac = usage.token_state(self.stats.plan)
-        except Exception:  # noqa: BLE001 — a broken log must never take the node down
+            state, frac, session, week = await asyncio.to_thread(
+                usage.token_state, self.stats.plan)
+        except Exception:  # noqa: BLE001 — a broken probe must never take the node down
             state, frac = self._token_state, self._token_frac
+            session, week = self._token_session, self._token_week
         self._token_state, self._token_frac = state, frac
-        return self.current_tokens() != before
+        self._token_session, self._token_week = session, week
+        return self._gossiped_tokens() != before
 
     @property
     def fingerprint(self) -> str:
@@ -267,7 +285,7 @@ class MeshNode:
             loop.create_task(self._heartbeat_loop(), name="mesh-heartbeat"),
             loop.create_task(self._snapshot_loop(), name="mesh-snapshot"),
         ]
-        self._refresh_tokens()  # seed the auto token state before the first advert
+        await self._refresh_tokens()  # seed the auto token state before the first advert
         self._last_token_refresh = time.monotonic()
         self._recompute("start")
         activity.log("mesh", "mesh-up",
@@ -1335,12 +1353,12 @@ class MeshNode:
             # Age the local accounting so the displayed usageAvg/quota decay even
             # while idle (local only — no gossip churn; peers hear on real change).
             self.stats = self.stats.decayed(time.time())
-            # Re-read real usage on a throttle (not every 2s write); if the auto token
-            # state flipped (e.g. we crossed into 'low'), tell peers so their load
-            # balancing routes accordingly.
+            # Re-probe the budget on a throttle (not every 2s write); if what peers
+            # see changed (state flip, or a remaining-percentage moved), tell them
+            # so their consoles and load balancing stay current.
             if time.monotonic() - self._last_token_refresh >= _TOKEN_REFRESH_SECS:
                 self._last_token_refresh = time.monotonic()
-                if self._refresh_tokens():
+                if await self._refresh_tokens():
                     self._bump_and_gossip()
                     self._recompute("token state")
             statefile.write_state(self.snapshot())

@@ -70,6 +70,10 @@ _PORT_BASE = 42000 + (os.getpid() % 400) * 20
 def _proto_env() -> dict:
     return {
         "ARGENT_MESH_LOOPBACK": "1",
+        # Offline + deterministic: never let a fleet node probe the real OAuth
+        # usage endpoint (on macOS dev machines the Keychain token would resolve
+        # even under a sandboxed HOME). Token states come from seeded logs/pins.
+        "ARGENT_MESH_OAUTH_PROBE": "0",
         "ARGENT_MESH_MCAST_PORT": str(_PORT_BASE),
         "ARGENT_MESH_TCP_BASE": str(_PORT_BASE + 1),
         "ARGENT_MESH_TCP_SPAN": "12",
@@ -534,6 +538,32 @@ def test_auto_token_state_reflects_real_usage(fleet):
     assert me["tokensAuto"] is True        # derived, not pinned
     assert me["tokens"] == "out"           # 20M > 10M ceiling
     assert me["tokensPct"] == 0.0
+    # Heuristic fallback (probe disabled in fleets) never advertises the real
+    # per-window percentages — the UIs then mark the estimate with '≈'.
+    assert "tokensSessionPct" not in me and "tokensWeekPct" not in me
+
+
+def test_pin_then_unpin_token_state_round_trips(fleet):
+    """Pinning ok/low/out flips tokensAuto off in the snapshot (the panel's picker
+    must show the pin, not 'Auto'); setting back to auto re-derives the state."""
+    fleet.start("solo1", "pinme", "linux", tier=3, tokens="auto")
+    _wait_for(lambda: fleet.state("solo1").get("self") or None, what="first snapshot")
+
+    r = fleet.cli("solo1", "--set", "tokens=low")
+    assert r.returncode == 0, r.stdout + r.stderr
+    me = _wait_for(
+        lambda: (fleet.state("solo1").get("self") or {}).get("tokens") == "low"
+        and fleet.state("solo1")["self"] or None,
+        what="pinned token state in the snapshot")
+    assert me["tokensAuto"] is False and me["tokens"] == "low"
+
+    r = fleet.cli("solo1", "--set", "tokens=auto")
+    assert r.returncode == 0, r.stdout + r.stderr
+    me = _wait_for(
+        lambda: (fleet.state("solo1").get("self") or {}).get("tokensAuto")
+        and fleet.state("solo1")["self"] or None,
+        what="auto-derived token state after unpin")
+    assert me["tokens"] in ("ok", "low", "out")  # derived again (empty logs → ok)
 
 
 def test_server_mode_runs_locally_and_never_dispatches_to_peers(fleet):

@@ -474,6 +474,58 @@ def test_token_state_thresholds(monkeypatch):
     assert usage.state_from_fraction(config.low_threshold() / 2) == "low"
 
 
+def test_token_state_prefers_real_quota_over_heuristic(monkeypatch):
+    """When the OAuth probe answers, the state comes from the account's REAL
+    windows — the tighter (binding) one — and both fractions are surfaced."""
+    from argent_utils.mesh import usage
+    monkeypatch.setattr(usage, "quota_left", lambda: (0.64, 0.27))
+    state, frac, sess, week = usage.token_state("pro")
+    assert (sess, week) == (0.64, 0.27)
+    assert frac == 0.27              # the week window binds
+    assert state == "low"            # 0.27 < lowThreshold 0.34
+
+
+def test_token_state_falls_back_to_heuristic_when_probe_dark(tmp_path, monkeypatch):
+    from argent_utils.mesh import usage
+    monkeypatch.setenv("HOME", str(tmp_path))  # empty logs → fresh heuristic
+    monkeypatch.setattr(usage, "quota_left", lambda: (None, None))
+    state, frac, sess, week = usage.token_state("pro")
+    assert (state, frac) == ("ok", 1.0)
+    assert sess is None and week is None  # marks the fraction an estimate
+
+
+def test_quota_left_parses_utilization_and_caches(monkeypatch):
+    from argent_utils.mesh import usage
+    monkeypatch.delenv("ARGENT_MESH_OAUTH_PROBE", raising=False)
+    calls = []
+    payload = {"five_hour": {"utilization": 36.0}, "seven_day": {"utilization": 27}}
+    monkeypatch.setattr(usage, "_fetch_usage_payload",
+                        lambda: calls.append(1) or payload)
+    usage._reset_probe_cache()
+    try:
+        assert usage.quota_left() == (0.64, 0.73)
+        assert usage.quota_left() == (0.64, 0.73)  # within TTL → served from cache
+        assert len(calls) == 1
+        # A malformed window (or an over-100 utilization) degrades per-field, never raises.
+        assert usage._frac_left({"utilization": 250}) == 0.0
+        assert usage._frac_left({"utilization": "high"}) is None
+        assert usage._frac_left(None) is None
+    finally:
+        usage._reset_probe_cache()  # never leak a fake probe result to other tests
+
+
+def test_quota_probe_disabled_by_env(monkeypatch):
+    from argent_utils.mesh import usage
+
+    def _boom():
+        raise AssertionError("probe must not run when disabled")
+
+    monkeypatch.setenv("ARGENT_MESH_OAUTH_PROBE", "0")
+    monkeypatch.setattr(usage, "_fetch_usage_payload", _boom)
+    usage._reset_probe_cache()
+    assert usage.quota_left() == (None, None)
+
+
 # MARK: identity — auto-detect + manual pin + token override
 
 

@@ -174,6 +174,8 @@ struct MeshView: View {
         let strengthAuto = peer?.strengthAuto ?? node?.strengthAuto ?? true
         let tokensAuto = peer?.tokensAuto ?? node?.tokensAuto ?? true
         let tokensPct = peer?.tokensPct ?? node?.tokensPct ?? 1.0
+        let sessionPct = peer != nil ? peer?.tokensSessionPct : node?.tokensSessionPct
+        let weekPct = peer != nil ? peer?.tokensWeekPct : node?.tokensWeekPct
         return VStack(alignment: .leading, spacing: 4) {
             nodeHeaderRow(name: name, platform: platform, peer: peer)
             if let addr = peer?.addr, !addr.isEmpty {
@@ -181,9 +183,11 @@ struct MeshView: View {
             }
             HStack(spacing: 10) {
                 strengthEditor(nodeID: id, tier: tier, auto: strengthAuto)
-                tokenEditor(nodeID: id, tokens: tokens, tokensPct: tokensPct, auto: tokensAuto)
+                tokenEditor(nodeID: id, tokens: tokens, auto: tokensAuto)
                 Spacer(minLength: 0)
             }
+            quotaRow(tokens: tokens, sessionPct: sessionPct, weekPct: weekPct,
+                     legacyPct: tokensPct, auto: tokensAuto)
             if let peer { trustToggle(peer) }
         }
         .padding(6)
@@ -241,24 +245,52 @@ struct MeshView: View {
               + "'weakest-first' routing keeps strong machines free; pick a word to pin it.")
     }
 
-    /// Token-budget picker. 'Auto' (default) shows the state derived from real recent
-    /// Claude usage + a live 'NN%' remaining; picking ok/low/out pins it (a pause escape).
-    private func tokenEditor(nodeID: String, tokens: String, tokensPct: Double, auto: Bool) -> some View {
+    /// Token-budget *setting* only — the measurement lives in `quotaRow`, so the picker
+    /// never doubles as an indicator. 'Auto' (default) derives ok/low/out from the node's
+    /// real quota; picking ok/low/out pins it (a pause escape).
+    private func tokenEditor(nodeID: String, tokens: String, auto: Bool) -> some View {
         let ids = catalog?.tokens.map { $0.id } ?? ["ok", "low", "out"]
-        let pct = Int((tokensPct * 100).rounded())
-        let autoLabel = "\(tokenMeta(tokens).glyph) Auto · \(pct)%"
         return Picker("", selection: Binding(
             get: { auto ? "auto" : tokens },
             set: { sel in store.meshSetAttr(nodeID: nodeID, attrs: ["tokens": sel]) }
         )) {
-            Text(autoLabel).tag("auto")
+            Text("Auto").tag("auto")
             ForEach(ids, id: \.self) { tid in
                 Text("\(tokenMeta(tid).glyph) \(tid)").tag(tid)
             }
         }
-        .labelsHidden().pickerStyle(.menu).frame(width: 118)
-        .help("Token budget — auto-measured from this machine's recent Claude usage "
-              + "(NN% of a per-plan ceiling left). The mesh skips 'out' nodes; pick a value to pin.")
+        .labelsHidden().pickerStyle(.menu).frame(width: 92)
+        .help("Token-budget setting. Auto derives ok/low/out from the node's real remaining "
+              + "quota (see the quota row); picking a value pins the state until set back to "
+              + "Auto. The mesh skips 'out' nodes.")
+    }
+
+    /// Read-only quota indicator, deliberately separate from the token-budget input:
+    /// the effective state's color, and the real remaining percentages per rate-limit
+    /// window (5-hour session · 7-day week) when the node's probe has them — else the
+    /// local '≈NN%' estimate. 'pinned' flags a manual override.
+    private func quotaRow(tokens: String, sessionPct: Double?, weekPct: Double?,
+                          legacyPct: Double, auto: Bool) -> some View {
+        let meta = tokenMeta(tokens)
+        var left: String
+        if let s = sessionPct {
+            left = "5h \(Int((s * 100).rounded()))%"
+            if let w = weekPct { left += " · wk \(Int((w * 100).rounded()))%" }
+            left += " left"
+        } else {
+            left = "≈\(Int((legacyPct * 100).rounded()))% left"
+        }
+        if !auto { left += " · pinned" }
+        return HStack(spacing: 4) {
+            Text("quota").font(.system(size: 9)).foregroundStyle(.secondary)
+            Circle().fill(meta.color).frame(width: 6, height: 6)
+            Text(left).font(.system(size: 9, weight: .bold)).foregroundStyle(meta.color)
+            Spacer(minLength: 0)
+        }
+        .help("Remaining Claude quota — the account's real rate-limit windows (5-hour "
+              + "session · 7-day week) via the OAuth usage probe; '≈' marks a local "
+              + "estimate (probe unavailable). 'pinned' = a manual override is in effect "
+              + "and the mesh routes on it.")
     }
 
     /// Personal | Foreign trust toggle for a peer's device. 'Personal' adds its proven

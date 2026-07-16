@@ -1,37 +1,161 @@
-"""Automatic token-budget signal from the local Claude usage logs.
+"""Token-budget signal: real Anthropic quota when reachable, local logs as fallback.
 
-There is no Anthropic API that reports remaining quota, so a node measures its
-*own* recent consumption instead: Claude Code appends every turn to
-``~/.claude/projects/**/*.jsonl`` with a ``usage`` block (input / output / cache
-token counts). This module sums the tokens spent in the last
-``accounts.usageWindowHours`` and compares them to a heuristic per-plan ceiling
-(``plan.weight × accounts.tokensPerWeight``) to produce the coarse ok/low/out
-state the mesh routes around — replacing the old hand-set dropdown.
+Primary source — the **OAuth usage endpoint** (the same data Claude Code's
+``/usage`` screen shows): utilization percentages for the account's real
+rate-limit windows, the 5-hour session and the 7-day week. The probe reads the
+Claude Code OAuth access token (``~/.claude/.credentials.json``, or the macOS
+Keychain item ``Claude Code-credentials``), GETs the endpoint, and converts each
+window's utilization into a remaining fraction. Results are cached ~1 min and a
+last-good read outlives transient failures, so the node never hammers the
+endpoint nor flaps on a dropped packet. ``ARGENT_MESH_OAUTH_PROBE=0`` disables
+the probe entirely (the tests run offline and deterministic).
 
-Kept cheap enough for the node's 2s snapshot loop: only files touched within the
-window are opened, and a per-node cache remembers each file's size + the running
-in-window total so a steady poll re-reads only the bytes appended since last time.
-Stdlib-only; honours ``HOME`` (so the tests, which sandbox HOME, never read a
-developer's real logs) and an explicit ``ARGENT_CLAUDE_DIR`` override.
+Fallback — when no token is available (or the probe is disabled/offline for
+long), a node measures its *own* recent consumption instead: Claude Code appends
+every turn to ``~/.claude/projects/**/*.jsonl`` with a ``usage`` block. This
+module sums the tokens spent in the last ``accounts.usageWindowHours`` and
+compares them to a heuristic per-plan ceiling (``plan.weight ×
+accounts.tokensPerWeight``). That estimate is deliberately rough (real limits
+are dynamic and account-specific) — it exists so an offline node still degrades
+to *some* ok/low/out signal rather than none.
+
+Stdlib-only; honours ``HOME`` and ``ARGENT_CLAUDE_DIR`` (so the tests, which
+sandbox HOME, never read a developer's real logs or credentials).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import time
+import urllib.request
 from pathlib import Path
 
 from . import config
 
 _HOUR_SECS = 3600.0
 
+# MARK: - real quota probe (OAuth usage endpoint)
+
+_OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+_OAUTH_BETA = "oauth-2025-04-20"
+_PROBE_TIMEOUT_SECS = 4.0
+# Min interval between endpoint attempts — the node refreshes its token state
+# every 30s, so this makes roughly every other refresh hit the network (the
+# cadence Claude statusline tools poll at).
+_PROBE_TTL_SECS = 55.0
+# Faster retry while there is NO last-good read yet (e.g. the seed fetch hit a
+# transient failure): stuck on the rough heuristic, the next refresh should try
+# again rather than wait out the full TTL.
+_PROBE_RETRY_SECS = 10.0
+# How long a last-good read keeps answering through failures before the module
+# gives up and falls back to the local heuristic.
+_PROBE_KEEP_SECS = 1800.0
+
+_probe_cache: dict = {"attempt": 0.0, "good": 0.0, "session": None, "week": None}
+
+
+def probe_enabled() -> bool:
+    """ARGENT_MESH_OAUTH_PROBE=0 turns the network probe off (tests, air-gapped)."""
+    return os.environ.get("ARGENT_MESH_OAUTH_PROBE", "1") != "0"
+
+
+def _reset_probe_cache() -> None:
+    """Test hook: forget any cached probe result."""
+    _probe_cache.update(attempt=0.0, good=0.0, session=None, week=None)
+
+
+def claude_dir() -> Path:
+    """Claude Code's home (credentials + transcripts). ARGENT_CLAUDE_DIR overrides."""
+    override = os.environ.get("ARGENT_CLAUDE_DIR")
+    return Path(override) if override else Path.home() / ".claude"
+
+
+def _oauth_token() -> str | None:
+    """The Claude Code OAuth access token: the credentials file where Claude Code
+    writes it (Linux, and any explicit ARGENT_CLAUDE_DIR sandbox), else the macOS
+    login-Keychain item. Claude Code refreshes the token as it runs, so re-reading
+    per probe always picks up the freshest one. None when absent — probe skipped."""
+    try:
+        raw = json.loads((claude_dir() / ".credentials.json").read_text(encoding="utf-8"))
+        tok = (raw.get("claudeAiOauth") or {}).get("accessToken")
+        if isinstance(tok, str) and tok:
+            return tok
+    except (OSError, ValueError):
+        pass
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(  # noqa: S603 — fixed argv, reads the user's own item
+                ["security", "find-generic-password",
+                 "-s", "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, timeout=_PROBE_TIMEOUT_SECS, check=False)
+            raw = json.loads(out.stdout.strip() or "{}")
+            tok = (raw.get("claudeAiOauth") or {}).get("accessToken")
+            if isinstance(tok, str) and tok:
+                return tok
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return None
+
+
+def _fetch_usage_payload() -> dict | None:
+    """One GET against the OAuth usage endpoint; None on any failure (no token,
+    offline, 401 after the token expired mid-window, garbage body)."""
+    token = _oauth_token()
+    if not token:
+        return None
+    req = urllib.request.Request(_OAUTH_USAGE_URL, headers={
+        "Authorization": f"Bearer {token}",
+        "anthropic-beta": _OAUTH_BETA,
+        "Content-Type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=_PROBE_TIMEOUT_SECS) as resp:  # noqa: S310
+            raw = json.loads(resp.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001 — a probe failure must never take the node down
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _frac_left(window: object) -> float | None:
+    """A window's remaining fraction from its ``utilization`` percent (0–100+)."""
+    if not isinstance(window, dict):
+        return None
+    util = window.get("utilization")
+    if not isinstance(util, (int, float)):
+        return None
+    return round(max(0.0, min(1.0, 1.0 - float(util) / 100.0)), 4)
+
+
+def quota_left() -> tuple[float | None, float | None]:
+    """(session_frac_left, week_frac_left) from the account's REAL rate-limit
+    windows (5-hour session, 7-day week). (None, None) when unavailable —
+    disabled, no credentials, or offline past the keep window."""
+    if not probe_enabled():
+        return None, None
+    now = time.monotonic()
+    interval = _PROBE_TTL_SECS if _probe_cache["session"] is not None else _PROBE_RETRY_SECS
+    if now - _probe_cache["attempt"] >= interval or _probe_cache["attempt"] == 0.0:
+        _probe_cache["attempt"] = now
+        payload = _fetch_usage_payload()
+        session = _frac_left((payload or {}).get("five_hour"))
+        if session is not None:
+            _probe_cache["good"] = now
+            _probe_cache["session"] = session
+            _probe_cache["week"] = _frac_left(payload.get("seven_day"))
+    if _probe_cache["session"] is not None and now - _probe_cache["good"] > _PROBE_KEEP_SECS:
+        _probe_cache["session"] = _probe_cache["week"] = None  # stale beyond trust
+    return _probe_cache["session"], _probe_cache["week"]
+
+
+# MARK: - fallback heuristic (local transcript consumption)
+
 
 def claude_projects_dir() -> Path:
     """Where Claude Code writes its per-session transcripts."""
-    override = os.environ.get("ARGENT_CLAUDE_DIR")
-    base = Path(override) if override else Path.home() / ".claude"
-    return base / "projects"
+    return claude_dir() / "projects"
 
 
 def _token_cost(usage: dict) -> float:
@@ -132,7 +256,16 @@ def state_from_fraction(frac: float) -> str:
     return "ok"
 
 
-def token_state(plan: str, now: float | None = None) -> tuple[str, float]:
-    """(ok|low|out, fraction_remaining) for this machine's real recent usage."""
+def token_state(plan: str, now: float | None = None
+                ) -> tuple[str, float, float | None, float | None]:
+    """(ok|low|out, binding_fraction, session_frac, week_frac) for this machine.
+
+    Prefers the account's REAL quota (OAuth usage endpoint; the binding fraction
+    is the tighter of the session/week windows). Falls back to the local log
+    heuristic — then session/week are None, marking the fraction an estimate."""
+    session, week = quota_left()
+    if session is not None:
+        frac = min(f for f in (session, week) if f is not None)
+        return state_from_fraction(frac), frac, session, week
     frac = fraction_remaining(plan, now)
-    return state_from_fraction(frac), frac
+    return state_from_fraction(frac), frac, None, None

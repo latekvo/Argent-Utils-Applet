@@ -89,9 +89,15 @@ def _print_status() -> int:
         return f"{label}{'(auto)' if info.get('strengthAuto') else ''}"
 
     def _tokens(info: dict) -> str:
-        pct = round(float(info.get("tokensPct", 1.0)) * 100)
         auto = "auto" if info.get("tokensAuto") else "pinned"
-        return f"{info.get('tokens')} {pct}% ({auto})"
+        sess, week = info.get("tokensSessionPct"), info.get("tokensWeekPct")
+        if isinstance(sess, (int, float)):
+            left = f"5h {round(sess * 100)}%"
+            if isinstance(week, (int, float)):
+                left += f" wk {round(week * 100)}%"
+        else:  # heuristic estimate (no real quota probe on that node)
+            left = f"≈{round(float(info.get('tokensPct', 1.0)) * 100)}%"
+        return f"{info.get('tokens')} {left} ({auto})"
 
     me = state.get("self", {})
     print(f"self  {me.get('name')}  {me.get('platform')}  {_strength(me)}"

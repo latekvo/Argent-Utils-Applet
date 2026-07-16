@@ -62,6 +62,16 @@ def overrides_signing_bytes(overrides_dict: dict) -> bytes:
     return _OVERRIDES_CONTEXT + _canonical(overrides_dict)
 
 
+def _opt_frac(v: object) -> float | None:
+    """An optional [0, 1]-clamped fraction from the wire; None when absent/garbage."""
+    if v is None:
+        return None
+    try:
+        return max(0.0, min(1.0, float(v)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 # MARK: - NodeInfo (the gossiped view of one node)
 
 
@@ -76,9 +86,17 @@ class NodeInfo:
     # whether the token state is auto-derived from real usage (vs a manual pin).
     strength_auto: bool = True
     tokens_auto: bool = True
-    # Fraction of the heuristic token budget still remaining (1.0 = fresh, 0.0 =
-    # out), so the console shows a live "quota NN%" for every node, not just self.
+    # Fraction of the token budget still remaining (1.0 = fresh, 0.0 = out), so
+    # the console shows a live "quota NN%" for every node, not just self. The
+    # binding value: min(session, week) when the real probe answers, else the
+    # local heuristic estimate.
     tokens_pct: float = 1.0
+    # Real remaining-quota fractions per rate-limit window (5-hour session,
+    # 7-day week) when the node's OAuth usage probe has them. None when the node
+    # is on the heuristic fallback — then OMITTED from the wire (additive fields,
+    # like pubkey/stats, so older builds interop unchanged).
+    tokens_session_pct: float | None = None
+    tokens_week_pct: float | None = None
     tcp_port: int = 0
     epoch: float = 0.0  # process start time — a restart bumps it (new incarnation)
     seq: int = 0  # per-node update counter; receivers keep the highest
@@ -121,6 +139,10 @@ class NodeInfo:
         }
         # Omit the additive fields when empty so v1 advertisements stay
         # byte-identical to before (and interop traces don't churn).
+        if self.tokens_session_pct is not None:
+            d["tokensSessionPct"] = round(self.tokens_session_pct, 3)
+        if self.tokens_week_pct is not None:
+            d["tokensWeekPct"] = round(self.tokens_week_pct, 3)
         if self.pubkey:
             d["pubkey"] = self.pubkey
         if self.stats:
@@ -141,6 +163,8 @@ class NodeInfo:
                 strength_auto=bool(d.get("strengthAuto", True)),
                 tokens_auto=bool(d.get("tokensAuto", True)),
                 tokens_pct=float(d.get("tokensPct", 1.0)),
+                tokens_session_pct=_opt_frac(d.get("tokensSessionPct")),
+                tokens_week_pct=_opt_frac(d.get("tokensWeekPct")),
                 tcp_port=int(d.get("tcpPort", 0)),
                 epoch=float(d.get("epoch", 0.0)),
                 seq=int(d.get("seq", 0)),

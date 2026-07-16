@@ -157,10 +157,12 @@ check(mesh.placement(for: "conflicts", overrides: overrides).strategy == mesh.de
 let snapJSON = """
 {"pid":4242,"tcpPort":40878,"v":1,"linking":0,
  "self":{"id":"aaa","name":"here","platform":"macos","tier":2,"tokens":"ok",
-         "strengthAuto":true,"tokensAuto":true,"tokensPct":0.81,"uptimeSecs":930.0},
+         "strengthAuto":true,"tokensAuto":true,"tokensPct":0.81,"uptimeSecs":930.0,
+         "tokensSessionPct":0.81,"tokensWeekPct":0.55},
  "peers":[{"id":"bbb","name":"lin","platform":"linux","tier":4,"tokens":"low",
            "link":"up","addr":"192.168.1.9:40878","lastSeenSecsAgo":1.4,"sees":["aaa"],
            "strengthAuto":false,"tokensAuto":true,"tokensPct":0.2,"uptimeSecs":187.0,
+           "tokensSessionPct":0.2,"tokensWeekPct":0.4,
            "trust":"personal","fingerprint":"ff11","verified":true}],
  "assignments":{"audit":{"assigned":["aaa"],"shortfall":[{"missing":1,"platform":"linux"}]}}}
 """.data(using: .utf8)!
@@ -170,6 +172,11 @@ check(snap.pid == 4242 && snap.tcpPort == 40878, "snapshot header")
 check(snap.selfNode?.platform == "macos" && snap.selfNode?.tier == 2, "self node")
 // The console fields (strength auto, auto token %, real uptime, trust) decode.
 check(snap.selfNode?.strengthAuto == true && snap.selfNode?.tokensPct == 0.81, "self console fields")
+// The real per-window quota percentages (OAuth usage probe) decode on both shapes.
+check(snap.selfNode?.tokensSessionPct == 0.81 && snap.selfNode?.tokensWeekPct == 0.55,
+      "self session/week quota decode")
+check(snap.peers[0].tokensSessionPct == 0.2 && snap.peers[0].tokensWeekPct == 0.4,
+      "peer session/week quota decode")
 check(snap.peers[0].strengthAuto == false && snap.peers[0].uptimeSecs == 187.0, "peer strength/uptime")
 check(snap.peers[0].trust == "personal" && snap.peers[0].verified == true, "peer trust decode")
 check(snap.peers.count == 1 && snap.peers[0].link == "up" && snap.peers[0].sees == ["aaa"], "peer decode")
@@ -183,14 +190,31 @@ check(snap.assignments["audit"]?.shortfall.first?.platform == "linux", "shortfal
 let snap2 = MeshSnapshot.decode("""
 {"pid":4242,"tcpPort":40878,"linking":0,
  "self":{"id":"aaa","name":"here","platform":"macos","tier":2,"tokens":"ok",
-         "strengthAuto":true,"tokensAuto":true,"tokensPct":0.81,"uptimeSecs":999.0},
+         "strengthAuto":true,"tokensAuto":true,"tokensPct":0.79,"uptimeSecs":999.0,
+         "tokensSessionPct":0.81,"tokensWeekPct":0.55},
  "peers":[{"id":"bbb","name":"lin","platform":"linux","tier":4,"tokens":"low",
            "link":"up","addr":"192.168.1.9:40878","lastSeenSecsAgo":9.9,"sees":["aaa"],
            "strengthAuto":false,"tokensAuto":true,"tokensPct":0.2,"uptimeSecs":999.0,
+           "tokensSessionPct":0.2,"tokensWeekPct":0.4,
            "trust":"personal","fingerprint":"ff11","verified":true}],
  "assignments":{"audit":{"assigned":["aaa"],"shortfall":[{"missing":1,"platform":"linux"}]}}}
 """.data(using: .utf8)!)
-check(snap == snap2, "snapshot equality ignores lastSeenSecsAgo/uptime drift")
+check(snap == snap2, "snapshot equality ignores lastSeenSecsAgo/uptime/raw-fraction drift")
+// A session-window percentage move IS a meaningful change — the quota indicator
+// must repaint when the probe reports a new integer percent.
+let snap3 = MeshSnapshot.decode("""
+{"pid":4242,"tcpPort":40878,"linking":0,
+ "self":{"id":"aaa","name":"here","platform":"macos","tier":2,"tokens":"ok",
+         "strengthAuto":true,"tokensAuto":true,"tokensPct":0.81,"uptimeSecs":930.0,
+         "tokensSessionPct":0.63,"tokensWeekPct":0.55},
+ "peers":[{"id":"bbb","name":"lin","platform":"linux","tier":4,"tokens":"low",
+           "link":"up","addr":"192.168.1.9:40878","lastSeenSecsAgo":1.4,"sees":["aaa"],
+           "strengthAuto":false,"tokensAuto":true,"tokensPct":0.2,"uptimeSecs":187.0,
+           "tokensSessionPct":0.2,"tokensWeekPct":0.4,
+           "trust":"personal","fingerprint":"ff11","verified":true}],
+ "assignments":{"audit":{"assigned":["aaa"],"shortfall":[{"missing":1,"platform":"linux"}]}}}
+""".data(using: .utf8)!)
+check(snap != snap3, "a session-quota percent move is a meaningful change")
 // Trust + accounting fields (device-key fingerprints, personal/foreign verdicts,
 // advertised stats, the published allowlist) — shaped exactly like the node writes
 // them since the trust/load-balancing layer landed.
@@ -225,6 +249,8 @@ check(!legacySnap.peers[0].verified && legacySnap.peers[0].trust == "personal"
       && legacySnap.peers[0].surplus == 0, "pre-trust peer defaults")
 check(legacySnap.selfNode?.surplus == 0 && legacySnap.selfNode?.stats == nil,
       "no stats ⇒ neutral surplus")
+check(legacySnap.selfNode?.tokensSessionPct == nil && legacySnap.peers[0].tokensWeekPct == nil,
+      "pre-probe snapshots ⇒ nil session/week quota (UI falls back to ≈estimate)")
 check(legacySnap.trusted.isEmpty, "no published allowlist ⇒ empty")
 // A trust flip IS a meaningful change (unlike lastSeenSecsAgo/uptime drift) — the
 // poll must republish when a peer's verdict moves.

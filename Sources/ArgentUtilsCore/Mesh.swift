@@ -203,8 +203,14 @@ public struct MeshNode: Decodable, Equatable {
     public let strengthAuto: Bool
     /// Whether the token state is auto-derived from real usage (vs a manual pin).
     public let tokensAuto: Bool
-    /// Fraction of the heuristic token budget still remaining (1.0 = fresh, 0.0 = out).
+    /// Fraction of the token budget still remaining (1.0 = fresh, 0.0 = out) — the
+    /// binding value: min(session, week) from the real probe, else the heuristic.
     public let tokensPct: Double
+    /// Real remaining fraction of the 5-hour session window (OAuth usage probe);
+    /// nil when the node is on the heuristic fallback (or an older build).
+    public let tokensSessionPct: Double?
+    /// Real remaining fraction of the 7-day week window; nil like `tokensSessionPct`.
+    public let tokensWeekPct: Double?
     /// Seconds this node has been running (self view) — nil when absent.
     public let uptimeSecs: Double?
     /// This node's device-key fingerprint (sha256 of the raw Ed25519 pubkey, hex);
@@ -215,7 +221,7 @@ public struct MeshNode: Decodable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, platform, tier, tokens, strengthAuto, tokensAuto, tokensPct,
-             uptimeSecs, fingerprint, stats
+             tokensSessionPct, tokensWeekPct, uptimeSecs, fingerprint, stats
     }
 
     public init(from decoder: Decoder) throws {
@@ -228,6 +234,8 @@ public struct MeshNode: Decodable, Equatable {
         strengthAuto = (try? c.decode(Bool.self, forKey: .strengthAuto)) ?? true
         tokensAuto = (try? c.decode(Bool.self, forKey: .tokensAuto)) ?? true
         tokensPct = (try? c.decode(Double.self, forKey: .tokensPct)) ?? 1.0
+        tokensSessionPct = try? c.decode(Double.self, forKey: .tokensSessionPct)
+        tokensWeekPct = try? c.decode(Double.self, forKey: .tokensWeekPct)
         uptimeSecs = try? c.decode(Double.self, forKey: .uptimeSecs)
         fingerprint = (try? c.decode(String.self, forKey: .fingerprint)) ?? ""
         stats = try? c.decode(MeshStats.self, forKey: .stats)
@@ -235,21 +243,27 @@ public struct MeshNode: Decodable, Equatable {
 
     public init(id: String, name: String, platform: String, tier: Int, tokens: String,
                 strengthAuto: Bool = true, tokensAuto: Bool = true, tokensPct: Double = 1.0,
+                tokensSessionPct: Double? = nil, tokensWeekPct: Double? = nil,
                 uptimeSecs: Double? = nil, fingerprint: String = "", stats: MeshStats? = nil) {
         self.id = id; self.name = name; self.platform = platform
         self.tier = tier; self.tokens = tokens
         self.strengthAuto = strengthAuto; self.tokensAuto = tokensAuto
-        self.tokensPct = tokensPct; self.uptimeSecs = uptimeSecs; self.fingerprint = fingerprint
+        self.tokensPct = tokensPct
+        self.tokensSessionPct = tokensSessionPct; self.tokensWeekPct = tokensWeekPct
+        self.uptimeSecs = uptimeSecs; self.fingerprint = fingerprint
         self.stats = stats
     }
 
     /// `uptimeSecs` ticks, and `tokensPct`/`stats` drift with real usage, so all three
     /// are excluded from equality — otherwise the change-detecting poll (see `Store`)
-    /// would fire twice a second on self's own uptime. Mirrors `MeshPeer.==`.
+    /// would fire twice a second on self's own uptime. The session/week percentages
+    /// ARE compared: they move at most about once a minute (integer-percent probe)
+    /// and the quota indicator must repaint when they do. Mirrors `MeshPeer.==`.
     public static func == (a: MeshNode, b: MeshNode) -> Bool {
         a.id == b.id && a.name == b.name && a.platform == b.platform && a.tier == b.tier
             && a.tokens == b.tokens && a.strengthAuto == b.strengthAuto
             && a.tokensAuto == b.tokensAuto && a.fingerprint == b.fingerprint
+            && a.tokensSessionPct == b.tokensSessionPct && a.tokensWeekPct == b.tokensWeekPct
     }
 
     /// `quotaLeft − usageAvg`, the figure `surplus-first` ranks by; 0 (neutral) with
@@ -274,6 +288,10 @@ public struct MeshPeer: Decodable, Equatable {
     public let strengthAuto: Bool
     public let tokensAuto: Bool
     public let tokensPct: Double
+    /// Real remaining fractions per rate-limit window (see `MeshNode`); nil on the
+    /// heuristic fallback or an older peer build.
+    public let tokensSessionPct: Double?
+    public let tokensWeekPct: Double?
     /// Seconds the current link has been up ("up 3m") — nil while down.
     public let uptimeSecs: Double?
     /// "personal" | "foreign" — the local allowlist's verdict on the VERIFIED key
@@ -292,8 +310,8 @@ public struct MeshPeer: Decodable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, platform, tier, tokens, link, addr, lastSeenSecsAgo, sees,
-             strengthAuto, tokensAuto, tokensPct, uptimeSecs, trust, fingerprint, verified,
-             surplus, stats
+             strengthAuto, tokensAuto, tokensPct, tokensSessionPct, tokensWeekPct,
+             uptimeSecs, trust, fingerprint, verified, surplus, stats
     }
 
     public init(from decoder: Decoder) throws {
@@ -310,6 +328,8 @@ public struct MeshPeer: Decodable, Equatable {
         strengthAuto = (try? c.decode(Bool.self, forKey: .strengthAuto)) ?? true
         tokensAuto = (try? c.decode(Bool.self, forKey: .tokensAuto)) ?? true
         tokensPct = (try? c.decode(Double.self, forKey: .tokensPct)) ?? 1.0
+        tokensSessionPct = try? c.decode(Double.self, forKey: .tokensSessionPct)
+        tokensWeekPct = try? c.decode(Double.self, forKey: .tokensWeekPct)
         uptimeSecs = try? c.decode(Double.self, forKey: .uptimeSecs)
         trust = (try? c.decode(String.self, forKey: .trust)) ?? "personal"
         fingerprint = (try? c.decode(String.self, forKey: .fingerprint)) ?? ""
@@ -327,6 +347,7 @@ public struct MeshPeer: Decodable, Equatable {
             && a.tokens == b.tokens && a.link == b.link && a.addr == b.addr && a.sees == b.sees
             && a.strengthAuto == b.strengthAuto && a.tokensAuto == b.tokensAuto
             && a.trust == b.trust && a.verified == b.verified && a.fingerprint == b.fingerprint
+            && a.tokensSessionPct == b.tokensSessionPct && a.tokensWeekPct == b.tokensWeekPct
     }
 }
 

@@ -534,10 +534,12 @@ class MeshView(QWidget):
         editors.addWidget(self._strength_editor(
             node_id, int(node.get("tier", 3)), bool(node.get("strengthAuto", True))))
         editors.addWidget(self._token_editor(
-            node_id, node.get("tokens", "ok"), node.get("tokensPct"),
-            bool(node.get("tokensAuto", True))))
+            node_id, node.get("tokens", "ok"), bool(node.get("tokensAuto", True))))
         editors.addStretch(1)
         outer.addLayout(editors)
+
+        # Read-only quota indicator, deliberately separate from the editor above.
+        outer.addLayout(self._quota_row(node))
 
         # Trust toggle (peers only — self is always "you").
         if peer is not None:
@@ -603,30 +605,63 @@ class MeshView(QWidget):
         else:
             self.store.mesh_set_attr(node_id, {"tier": int(data)})
 
-    def _token_editor(self, node_id: str, tokens: str, pct, auto: bool) -> QComboBox:
-        """Token-budget picker. 'Auto' (default) shows the state derived from the
-        machine's real recent Claude usage + a live 'NN%' remaining; the mesh routes
-        around 'out' nodes. Picking ok/low/out pins the state (a pause escape)."""
+    def _token_editor(self, node_id: str, tokens: str, auto: bool) -> QComboBox:
+        """Token-budget *setting* only — the measurement lives in the quota row, so
+        this combo never doubles as an indicator. 'Auto' (default) derives ok/low/out
+        from the node's real quota; picking ok/low/out pins it (a pause escape)."""
         combo = QComboBox()
         combo.setStyleSheet("font-size: 10px;")
-        pct_txt = f" · {round(pct * 100)}%" if isinstance(pct, (int, float)) else ""
-        combo.addItem(f"{_TOKEN_GLYPH.get(tokens, '●')} Auto{pct_txt}", "auto")
-        combo.setItemData(0, QColor(_TOKEN_COLOR.get(tokens, "#8E8E93")),
-                          Qt.ItemDataRole.ForegroundRole)
+        combo.addItem("Auto", "auto")
         for tid in _TOKEN_ORDER:  # ok / low / out
             idx = combo.count()
             combo.addItem(f"{_TOKEN_GLYPH[tid]} {tid}", tid)
             combo.setItemData(idx, QColor(_TOKEN_COLOR[tid]), Qt.ItemDataRole.ForegroundRole)
         combo.setCurrentIndex(0 if auto else max(0, combo.findData(tokens)))
         combo.setToolTip(
-            "Token budget — auto-measured from this machine's recent Claude usage "
-            "(NN% of a per-plan ceiling remaining). The mesh skips 'out' nodes; pick "
-            "a value to pin it, or Auto to track real usage."
+            "Token-budget setting. Auto derives ok/low/out from the node's real "
+            "remaining quota (see the quota row); picking a value pins the state "
+            "until set back to Auto. The mesh skips 'out' nodes."
         )
         combo.activated.connect(
             lambda _i, c=combo: self.store.mesh_set_attr(node_id, {"tokens": c.currentData()})
         )
         return combo
+
+    def _quota_row(self, node: dict) -> QHBoxLayout:
+        """Read-only quota indicator (separate from the token-budget input): the
+        effective state's glyph + color, and the real remaining percentages per
+        rate-limit window (5-hour session · 7-day week) when the node's probe has
+        them — else the local '≈NN%' estimate. 'pinned' flags a manual override."""
+        tokens = node.get("tokens", "ok")
+        sess, week = node.get("tokensSessionPct"), node.get("tokensWeekPct")
+        if isinstance(sess, (int, float)):
+            left = f"5h {round(sess * 100)}%"
+            if isinstance(week, (int, float)):
+                left += f" · wk {round(week * 100)}%"
+            left += " left"
+        elif isinstance(node.get("tokensPct"), (int, float)):
+            left = f"≈{round(node['tokensPct'] * 100)}% left"
+        else:
+            left = tokens
+        if not node.get("tokensAuto", True):
+            left += " · pinned"
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        cap = QLabel("quota")
+        cap.setStyleSheet("color: palette(mid); font-size: 9px;")
+        row.addWidget(cap)
+        color = _TOKEN_COLOR.get(tokens, "#8E8E93")
+        val = QLabel(f"{_TOKEN_GLYPH.get(tokens, '●')} {left}")
+        val.setStyleSheet(f"color: {color}; font-size: 9px; font-weight: 700;")
+        val.setToolTip(
+            "Remaining Claude quota — the account's real rate-limit windows "
+            "(5-hour session · 7-day week) via the OAuth usage probe; '≈' marks a "
+            "local estimate (probe unavailable). 'pinned' = a manual override is in "
+            "effect and the mesh routes on it."
+        )
+        row.addWidget(val)
+        row.addStretch(1)
+        return row
 
     def _trust_toggle(self, peer: dict) -> QHBoxLayout:
         """A Personal | Foreign segmented toggle for a peer's device. 'Personal' adds

@@ -50,7 +50,7 @@
     "quotaWindowDays": 7.0,
     "usageTimeConstantDays": 21.0,
 
-    "_tokenComment": "Automatic token-budget signal (the ok/low/out state the panel shows and the mesh routes around). There is NO Anthropic API for remaining quota, so a node instead measures its OWN recent token CONSUMPTION from the local Claude logs (~/.claude/projects/**/*.jsonl, input+output+cache-creation tokens over the last usageWindowHours) and compares it to a heuristic per-plan ceiling: ceiling = plan.weight × tokensPerWeight. Fraction remaining = 1 − used/ceiling; ≥ lowThreshold → ok, > 0 → low, ≤ 0 → out. These numbers are deliberately rough (real limits are dynamic and account-specific); tune tokensPerWeight, or pin a node's state with the manual override.",
+    "_tokenComment": "Automatic token-budget signal (the ok/low/out state the panel shows and the mesh routes around). PRIMARY: the node probes the account's REAL remaining quota via the OAuth usage endpoint (the same data Claude Code's /usage shows) — utilization of the 5-hour session and 7-day week rate-limit windows, gossiped as tokensSessionPct/tokensWeekPct; the binding (smaller) fraction drives the state: ≥ lowThreshold → ok, > 0 → low, ≤ 0 → out. FALLBACK (no credentials / offline / ARGENT_MESH_OAUTH_PROBE=0): the node measures its OWN recent consumption from the local Claude logs (~/.claude/projects/**/*.jsonl, input+output+cache-creation tokens over the last usageWindowHours) against a heuristic per-plan ceiling = plan.weight × tokensPerWeight. The fallback is deliberately rough (real limits are dynamic and account-specific) — the UIs mark it '≈'; tune tokensPerWeight, or pin a node's state with the manual override.",
     "tokensPerWeight": 2000000,
     "usageWindowHours": 5.0,
     "lowThreshold": 0.34
