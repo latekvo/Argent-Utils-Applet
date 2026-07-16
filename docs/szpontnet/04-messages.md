@@ -20,6 +20,8 @@ peer TCP link; **ctl** = sent on a control session (client↔node).
 | [`set-attr`](#set-attr) | link / ctl | to a node | change a node's advertised attributes |
 | [`dispatch`](#dispatch) | link / ctl | to a node | run a job here |
 | [`job-status`](#job-status) | link | reply | outcome of a dispatch (`spawned` / `declined` / `failed`) |
+| [`job-result`](#job-result) | link | executor→originator | the computed artifact a **foreign** request returns; the originator then acts on it ([13](13-foreign-execution.md)) |
+| [`job-ack`](#job-ack) | link | originator→executor | acknowledges a `job-result` (reliable delivery) ([13](13-foreign-execution.md)) |
 | [`work-claim`](#work-claim) | link | gossip | a self-signed origination lease on a unit of work ([12](12-work-claims.md)) |
 | [`ctl`](#ctl) | ctl | client→node, first message | opens a control session |
 | [`status`](#status) | ctl | client→node | request the state snapshot |
@@ -384,6 +386,52 @@ that learns a live job id cannot resolve someone else's dispatch).
 > "this candidate didn't take it - fail over to the next." The sole exception is an
 > explicit [`target`](#dispatch): that outcome is reported as-is, with no failover.
 > Additional statuses are a reserved extension ([09](09-extensibility.md)).
+
+### `job-result`
+
+The computed artifact a **foreign** (zero-trust) SzpontRequest returns to its
+originator, who then performs any social action itself. Sent by the executor on the
+same link the [`dispatch`](#dispatch) arrived on, correlated by Job `id`, and
+**re-sent until acknowledged** by a [`job-ack`](#job-ack). Full semantics in
+[13-foreign-execution](13-foreign-execution.md).
+
+```json
+{"t": "job-result", "id": "b1c2…", "node": "bd4eaf…",
+ "result": {"ok": true, "duty": "review", "output": "…the artifact…", "error": ""},
+ "sig": "…base64…", "v": 1}
+```
+
+| Field | Type | Req? | Meaning |
+|-------|------|------|---------|
+| `id` | string | **yes** | the Job `id` this result answers. |
+| `node` | string | **yes** | the executor's node id. |
+| `result` | object | **yes** | `{"ok": bool, "duty": string, "output": string, "error": string}` — the computed payload; `output` is the opaque artifact the originator acts on, `error` is set when `ok` is `false`. |
+| `sig` | string | no | Ed25519 signature by the executor over `"szpontnet-jobresult-v1:" ‖ canonical({id,node,result})`. A **keyed** executor MUST sign; a keyless one omits it. |
+
+A receiver **MUST** accept a `job-result` only from the peer it dispatched that Job
+`id` to (the responder-link gate, like [`job-status`](#job-status)) and — when that
+executor is keyed — only with a valid `sig` against its pinned key; it **drops** an
+unknown-id, wrong-link, or badly-signed result. `output` rides one NDJSON line, so
+it is bounded by [`MAX_LINE_BYTES`](#encoding-rules-summary); a larger artifact is
+truncated by the executor. See [13](13-foreign-execution.md).
+
+### `job-ack`
+
+The originator's acknowledgement of a [`job-result`](#job-result), by Job `id`.
+Stops the executor's retry loop — reliable delivery, not fire-and-forget.
+
+```json
+{"t": "job-ack", "id": "b1c2…", "node": "3236…", "v": 1}
+```
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `id` | string | the Job `id` being acknowledged. |
+| `node` | string | the acknowledging (originator) node id. |
+
+An executor **MUST** accept a `job-ack` only from the node it owes that result to.
+The originator **MUST** ack every recognized result — a duplicate included — and act
+on it **at most once**. See [13-foreign-execution](13-foreign-execution.md).
 
 ### `work-claim`
 

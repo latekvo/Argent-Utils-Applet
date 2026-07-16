@@ -172,15 +172,19 @@ caps. No flag day, no `v` bump required for the common cases - exactly the
   broadcast). Federation across subnets is future work.
 - **Foreign zero-trust execution.** The two-level trust model (`personal`/`foreign`,
   keyed on a peer's **verified device fingerprint** against a local allowlist
-  ([11](11-trust-and-balancing.md))) **has landed**, and a foreign requester is
-  [declined](07-dispatch.md#refusal-policy). What is deferred is only the
-  *implementation* of foreign **execution**; the **security contract it must obey**
-  is already normative — the [foreign execution security
+  ([11](11-trust-and-balancing.md))) **has landed**, and so now has foreign
+  **execution**: a node with a [confinement runner](13-foreign-execution.md)
+  configured runs a foreign request **confined and response-only** — sandboxed
+  compute, no host-identity action, the result returned as a
+  [`job-result`](04-messages.md#job-result) for the requester to act on — per the
+  normative [foreign execution security
   contract](11-trust-and-balancing.md#the-foreign-execution-security-contract-normative)
-  (sandboxed compute, no host-identity/social action, response-only with confined
-  declared side effects). So today a foreign request is refused outright, and any
-  future revision that runs foreign compute MUST satisfy that contract before it
-  does — the model forbids unsandboxed foreign code, it doesn't merely defer it.
+  and [13-foreign-execution](13-foreign-execution.md). Without a runner a foreign
+  request is still [declined](07-dispatch.md#refusal-policy) (the safe default); the
+  model forbids unsandboxed foreign code either way. What remains future work is
+  *transport confidentiality* for the returned artifact (below) and a
+  transitive/PKI trust story so a foreign result can route through a personal
+  *relay*, not only back to the origin.
 - **Transport encryption / confidentiality.** **Authentication has landed, both at
   the link and across gossip.** Each node holds a per-device
   [Ed25519 key](08-state.md#devicekey), proves possession on every link (a signature

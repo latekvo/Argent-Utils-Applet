@@ -106,6 +106,16 @@ the work is originated once, not once per observer. A claim lasts only while its
 claimant is alive, so a dead owner's work is freed for a survivor. This is an
 optional layer on top of dispatch; see [12-work-claims](12-work-claims.md).
 
+## Foreign execution and job result
+
+A **foreign** dispatch (from a device you have not trusted) is either declined or —
+if the receiver has a confinement runner — run **confined**: its compute happens in a
+sandbox, and the receiver returns a **job result** rather than acting on it. The
+**originator** then performs any social action (opening a PR, commenting) itself,
+under its own identity. The result is delivered reliably (acknowledged, retried until
+acked). This is an optional zero-trust layer; see
+[13-foreign-execution](13-foreign-execution.md).
+
 ## Link and peer
 
 A **peer** is another node this node knows about. A **link** is the single TCP

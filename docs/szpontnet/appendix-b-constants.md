@@ -23,6 +23,9 @@ may place work differently ([09](09-extensibility.md#vocabulary-skew)).
 | `peerTimeoutSecs` | `10.0` | [link state → `down`](03-transport.md#link-state) |
 | `dispatchAckTimeoutSecs` | `8.0` | [remote dispatch wait](07-dispatch.md#placing-on-a-node) |
 | `stateWriteIntervalSecs` | `2.0` | [snapshot write cadence](08-state.md#the-statejson-snapshot) |
+| `foreignResultRetryIntervalSecs` | `5.0` | [job-result retry cadence](13-foreign-execution.md#reliable-delivery) |
+| `foreignResultMaxSecs` | `120.0` | [job-result give-up window](13-foreign-execution.md#reliable-delivery) |
+| `foreignJobTimeoutSecs` | `900.0` | [confined compute budget](13-foreign-execution.md#reliable-delivery) |
 | `MAX_LINE_BYTES` | `524288` (512 KiB) | [framing](03-transport.md#framing) |
 | UDP receive buffer | ≥ `2048` bytes | [discovery receive](02-discovery.md#receiving) |
 | multicast TTL | `1` (link-local) | [discovery send](02-discovery.md#transport-multicast-plus-broadcast) |
@@ -94,11 +97,16 @@ gossip). See
 `canonical(x)` = JSON of `x` **with its `sig` removed, keys sorted, compact
 separators** (`,`/`:`), and the tags are `szpontnet-nodeinfo-v1:` (advertisements),
 `szpontnet-overrides-v1:` (overrides), and `szpontnet-workclaim-v1:`
-([work-claims](12-work-claims.md#authentication)). An advertisement is signed by its
-own device key and verified against its own `pubkey`; an override is signed by its
-`updatedBy` node and verified against that node's pinned key; a work-claim is signed
-by its `node` claimant and verified against the `pubkey` carried inline. `sig` is
-omitted when empty (keyless). See [11 - authenticated gossip](11-trust-and-balancing.md#authenticated-gossip).
+([work-claims](12-work-claims.md#authentication)). The same canonical construction,
+under the tag `szpontnet-jobresult-v1:`, signs a
+[`job-result`](13-foreign-execution.md#correlation-and-authenticity) — a unicast link
+reply rather than gossip, but signed identically so the originator can bind the
+returned artifact to the executor's key. An advertisement is signed by its own device
+key and verified against its own `pubkey`; an override is signed by its `updatedBy`
+node and verified against that node's pinned key; a work-claim is signed by its `node`
+claimant and verified against the `pubkey` carried inline; a job-result is signed by
+its executor and verified against that executor's pinned key. `sig` is omitted when
+empty (keyless). See [11 - authenticated gossip](11-trust-and-balancing.md#authenticated-gossip).
 
 ## Server & API key (v1 vocabulary)
 
@@ -169,12 +177,27 @@ in [06-coordination](06-coordination.md#ranking).
 Work-claims are an **optional role** ([12 conformance](12-work-claims.md#conformance));
 a node that omits them drops the `work-claim` message and keeps the link.
 
+## Foreign execution (v0.3.0 vocabulary)
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| job-result signing tag | `szpontnet-jobresult-v1:` | domain tag for a `job-result` `sig` ([13](13-foreign-execution.md#correlation-and-authenticity)). |
+| confinement runner via | `ARGENT_MESH_FOREIGN_SPAWN` | operator's sandbox command (`{prompt_file}`/`{result_file}`); its presence enables confined foreign execution, absence = decline ([13](13-foreign-execution.md#confinement-the-executors-responsibility)). |
+| result handler via | `ARGENT_MESH_ON_RESULT` | originator's own-identity action on a returned result (`{result_file}`); where e.g. `gh` runs. |
+| `foreignResultRetryIntervalSecs` | `5.0` | executor re-sends an unacked `job-result` this often. |
+| `foreignResultMaxSecs` | `120.0` | executor gives up delivering after this (originator presumed gone). |
+| `foreignJobTimeoutSecs` | `900.0` | confined compute budget before the executor returns an `ok:false` result. |
+
+Foreign execution is an **optional role** ([13 conformance](13-foreign-execution.md#conformance));
+a node that omits it drops the `job-result`/`job-ack` messages and keeps the link,
+and declines foreign requests.
+
 ## Message types
 
 `beacon`, `hello`, `auth`, `node`, `overrides`, `heartbeat`, `set-attr`,
-`dispatch`, `job-status`, `work-claim`, `ctl`, `status`, `state`, `set-overrides`,
-`trust`, `untrust`, `stop`, `ok`, `error`, `dispatch-result`. Full reference:
-[04-messages](04-messages.md).
+`dispatch`, `job-status`, `job-result`, `job-ack`, `work-claim`, `ctl`, `status`,
+`state`, `set-overrides`, `trust`, `untrust`, `stop`, `ok`, `error`,
+`dispatch-result`. Full reference: [04-messages](04-messages.md).
 
 ## Job statuses
 

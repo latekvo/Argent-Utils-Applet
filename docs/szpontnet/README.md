@@ -1,6 +1,6 @@
 # SzpontNet - a LAN peer-to-peer resource-sharing protocol
 
-**Specification v0.2.0** (wire `v: 1`). This directory is the normative specification for
+**Specification v0.3.0** (wire `v: 1`). This directory is the normative specification for
 **SzpontNet**: a small, leaderless protocol that lets the machines on a local
 network find each other, **advertise the resources they have available**, and
 hand work to whichever machine is the best fit - with no central coordinator and
@@ -49,8 +49,9 @@ the chosen machine(s), failing over if the first pick can't take it.
 4. **Trust scoped to devices you have explicitly trusted.** A node runs a request
    from a **personal** peer (a device whose key you've added to a local allowlist)
    directly, as if you'd triggered it locally; a request from any other
-   (**foreign**) device is declined until the zero-trust foreign path exists. Trust
-   is proven by a device keypair, never inferred from a spoofable advertised field.
+   (**foreign**) device is declined, or run confined via the [zero-trust foreign
+   path](13-foreign-execution.md). Trust is proven by a device keypair, never
+   inferred from a spoofable advertised field.
    With no allowlist configured every peer is personal, so this reduces to full
    altruism. See [11-trust-and-balancing](11-trust-and-balancing.md).
 5. **Extensible without breaking changes.** The trust model, the resource
@@ -79,9 +80,11 @@ local allowlist ([11-trust-and-balancing](11-trust-and-balancing.md)):
   list is **personal**; anyone else is **foreign**.
 
 A personal peer's requests run directly, as if you'd pressed the button on that
-machine yourself. A **foreign** peer's requests are **declined** in v1; the future
-zero-trust design lets a foreign node run the *compute* but routes any social
-action back through one of your personal nodes before it happens.
+machine yourself. A **foreign** peer's requests are **declined** by default; a node
+that opts in with a [confinement runner](13-foreign-execution.md) instead runs the
+*compute* sandboxed and routes any social action back to a personal node of the
+requester before it happens - zero trust for the stranger, full trust preserved for
+you.
 
 The boundary is opt-in and safe by default: **an empty allowlist means full
 trust** (every peer personal), so a fresh mesh behaves precisely as the trusting
@@ -123,7 +126,8 @@ don't change behavior. The major stays `0` until the protocol is declared stable
 | Spec version | Adds |
 |--------------|------|
 | **v0.1.0** | discovery, links, gossip, deterministic placement, dispatch/failover, the personal/foreign trust model, server + API key, and authenticated gossip (signed advertisements + overrides). |
-| **v0.2.0** *(this revision)* | [work-claims](12-work-claims.md) — leaderless origination-dedup leases. |
+| **v0.2.0** | [work-claims](12-work-claims.md) — leaderless origination-dedup leases. |
+| **v0.3.0** *(this revision)* | [foreign zero-trust execution](13-foreign-execution.md) — confined compute for a foreign request, with the result returned (`job-result`/`job-ack`) for the originator to act on. |
 
 This is **separate from the wire `v` field**, which every message carries
 ([04](04-messages.md)). That field is the **wire-compatibility version**, a single
@@ -152,6 +156,7 @@ The chapters are ordered so you can implement bottom-up:
 | 10 | [Conformance](10-conformance.md) | MUST/SHOULD/MAY, a minimal-node checklist, interop vectors |
 | 11 | [Trust & load balancing](11-trust-and-balancing.md) | personal/foreign trust, per-node quota stats, surplus-first dispatch, refusals |
 | 12 | [Work claims](12-work-claims.md) | leaderless origination dedup: who runs externally-triggered work, and failover when the owner dies |
+| 13 | [Foreign execution](13-foreign-execution.md) | zero-trust: run a foreign request's compute confined, return the result for the originator to act on |
 | A | [Appendix A - annotated trace](appendix-a-trace.md) | a full two-node session, message by message |
 | B | [Appendix B - constants](appendix-b-constants.md) | every default value in one table |
 

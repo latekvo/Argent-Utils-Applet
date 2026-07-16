@@ -138,11 +138,15 @@ status) rather than running when any of:
 
 - the requester is a **foreign** device - one whose proven key isn't in this node's
   local [trust allowlist](11-trust-and-balancing.md#trust-is-never-derived-from-an-advertisement)
-  (classified from the *verified* link, never from the job's `requestedBy`). The
-  zero-trust path - run the compute here (sandboxed) but route any social action
-  back through a *personal* node - is not built yet, so a stranger's request is
-  declined rather than acted on on their behalf. Any implementation that *does*
-  execute foreign work MUST honor the [foreign execution security
+  (classified from the *verified* link, never from the job's `requestedBy`) - **and**
+  this node has no [confinement runner](13-foreign-execution.md#confinement-the-executors-responsibility)
+  configured. A node *with* one instead runs the foreign request **confined and
+  response-only** - the [zero-trust path](13-foreign-execution.md): compute in a
+  sandbox, return a [`job-result`](04-messages.md#job-result) for the requester to act
+  on - replying `spawned` (the hand-off) rather than declining. Without a runner,
+  declining is the safe default. Either way the receiver never takes a social action
+  on a stranger's behalf, and any node that *does* execute foreign work MUST honor the
+  [foreign execution security
   contract](11-trust-and-balancing.md#the-foreign-execution-security-contract-normative)
   (sandboxed, no host-identity action, response-only);
 - the request lacks a required **API key** - a
@@ -165,8 +169,13 @@ it, exactly like a local spawn; a headless deployment substitutes its own runner
 SzpontNet only requires that the node truthfully report `spawned` vs `failed`.
 
 > **v1 reports hand-off, not completion.** `spawned` means the node accepted and
-> started the work; SzpontNet does not track the job to completion or return its
-> result. Completion tracking is a [reserved extension](09-extensibility.md).
+> started the work; for a *personal* job SzpontNet does not track it to completion or
+> return its result. Completion tracking is a [reserved
+> extension](09-extensibility.md). The one place a result *is* returned is a
+> **foreign, confined** job: it too replies `spawned` at hand-off, then returns its
+> computed artifact out of band as a [`job-result`](04-messages.md#job-result) for the
+> originator to act on ([13](13-foreign-execution.md)) - a response to a zero-trust
+> request, not general completion tracking.
 
 ## Dispatching via a control session
 

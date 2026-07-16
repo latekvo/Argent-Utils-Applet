@@ -166,6 +166,7 @@ client can get it live or from disk.
   },
   "overrides": {"rev": 0, "updatedBy": "", "duties": {}},
   "claims": {},
+  "foreign": {"pendingResults": 0, "awaiting": 0},
   "v": 1
 }
 ```
@@ -188,6 +189,7 @@ pinned, else the usage-derived state), not the raw override.
 | `assignments` | object | `{duty: {duty, assigned:[node_id], shortfall:[{platform, missing}]}}` - the computed placement ([06](06-coordination.md)). |
 | `overrides` | object | the effective [placement overrides](06-coordination.md#placement-overrides). |
 | `claims` | object | `{workKey: ownerNodeId}` for every currently-owned [work-claim](12-work-claims.md) this node observes (unowned keys omitted); lets a UI show what work is already spoken for. `{}` on a node that implements no work-claims. |
+| `foreign` | object | `{pendingResults, awaiting}` — counts of in-flight [foreign-execution](13-foreign-execution.md) exchanges: `job-result`s this node computed and owes back to a foreign requester (unacked), and remote dispatches it is still willing to receive a result for. Both `0` on a node that runs no foreign work. |
 | `v` | int | snapshot/protocol version. |
 
 **Liveness of the snapshot itself.** A reader can tell a live node from a dead one

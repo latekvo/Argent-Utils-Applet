@@ -23,7 +23,7 @@ is one of two levels:
 | Level | Meaning | What happens to its SzpontRequests |
 |-------|---------|-----------------------------------|
 | **personal** | a device *you have explicitly trusted* | run **directly**, as if you had triggered the work from your own panel |
-| **foreign** | any other device | **declined** in v1 (see [the foreign path](#the-foreign-path-future-zero-trust)) |
+| **foreign** | any other device | **declined** by default; or, with a [confinement runner](13-foreign-execution.md) configured, run **confined and response-only** (see [the foreign path](#the-foreign-path-zero-trust)) |
 
 ### Trust is never derived from an advertisement
 
@@ -106,22 +106,28 @@ review SzpontRequest from your laptop runs on your desktop just as if you had
 pressed the review button there yourself - full-trust altruism, scoped to the
 devices you have explicitly trusted.
 
-### The foreign path (future zero-trust)
+### The foreign path (zero-trust)
 
-The foreign path is **deliberately unimplemented in v1.** A node that receives a
-SzpontRequest from a foreign device **declines** it (a [`declined`](#refusals-are-first-class)
-`job-status`, reason `"foreign device (zero-trust path not implemented)"`).
+A node that receives a SzpontRequest from a foreign device has two safe options,
+chosen by whether it has a [confinement runner](13-foreign-execution.md#confinement-the-executors-responsibility)
+configured:
 
-The intended future design (the *execution* is reserved/not-yet-built, but the
-**security contract below is normative now** so that any implementation that ever
-runs foreign work does so safely): a foreign node MAY run the *compute* half of a
-SzpontRequest, but any **social action** - submitting a pull request, commenting
-on GitHub, anything that acts under an identity - MUST be sent **back to a personal
-node of the requester** to perform, rather than executed locally. That keeps a
-stranger's machine from ever acting as you. Until that routing exists, declining
-is the safe behavior, and it costs nothing: the dispatcher's
-[failover](07-dispatch.md#routing-a-job) already handles a declined candidate like
-any other, so a foreign node simply falls out of consideration.
+- **No runner (the default):** it **declines** (a [`declined`](#refusals-are-first-class)
+  `job-status`, reason `"foreign device (zero-trust path not implemented)"`). The
+  dispatcher's [failover](07-dispatch.md#routing-a-job) handles a declined candidate
+  like any other, so a foreign node simply falls out of consideration — it costs
+  nothing.
+- **With a runner:** it runs the *compute* half **confined**, and returns the result
+  for the requester to act on — the design realized in
+  [13-foreign-execution](13-foreign-execution.md). Any **social action** —
+  submitting a pull request, commenting on GitHub, anything that acts under an
+  identity — is **never** executed on the foreign node; the computed artifact is sent
+  **back to a personal node of the requester** (the requester itself) to perform
+  there. That keeps a stranger's machine from ever acting as you, and keeps you from
+  ever running its untrusted work on your host.
+
+The **security contract below is normative** either way: an implementation that runs
+foreign work (rather than declining it) MUST satisfy it, and the reference does.
 
 #### The foreign execution security contract (normative)
 
@@ -153,10 +159,12 @@ v1 does) **MUST** guarantee all of:
    requester.
 
 These are the boundaries that make "zero trust for foreign, absolute trust for
-personal" real rather than advisory. v1 satisfies the contract trivially by
-**declining** every foreign request ([refusals](#refusals-are-first-class)); a
-future revision that lets foreign compute run MUST satisfy points 1-3 before it
-does.
+personal" real rather than advisory. A node with no confinement runner satisfies the
+contract trivially by **declining** every foreign request
+([refusals](#refusals-are-first-class)); a node that runs foreign compute MUST
+satisfy points 1-3 while doing so. The wire mechanism that carries the result back
+(and the reference implementation of the confined path) is
+[13-foreign-execution](13-foreign-execution.md).
 
 ### Mutating a node is a personal-only action
 
@@ -455,11 +463,12 @@ An implementation of this chapter:
   signature; **pin** id→key so a gossiped key-swap is rejected (only the node's own
   link may re-key); and **relay advertisements verbatim** so signatures survive. A
   keyless advert is accepted unauthenticated (hence foreign).
-- **MUST**, if it ever *executes* (rather than declines) a **foreign**
-  SzpontRequest, enforce the [foreign execution security
+- **MUST**, if it *executes* (rather than declines) a **foreign** SzpontRequest,
+  enforce the [foreign execution security
   contract](#the-foreign-execution-security-contract-normative): sandboxed compute,
-  no host-identity/social action, response-only with confined declared side
-  effects.
+  no host-identity/social action, response-only with confined declared side effects —
+  returning the result as a [`job-result`](04-messages.md#job-result) for the
+  requester to act on, per [13-foreign-execution](13-foreign-execution.md).
 - **MUST**, if configured as an API-key [server](#the-api-key), require a matching
   `apiKey` on inbound `ctl` and `dispatch` and refuse those without it; and, if in
   [server mode](#the-server-role), never originate a dispatch to a peer.
@@ -467,8 +476,9 @@ An implementation of this chapter:
   a node that uses neither is byte-compatible with a core v1 advertisement.
 - **MUST** treat a `declined` `job-status` as a non-`spawned` outcome (fail the
   slot over), exactly like `failed`, whether or not it understands the reason.
-- **SHOULD** decline a foreign device's SzpontRequest until the zero-trust foreign
-  path is implemented, rather than running it.
+- **SHOULD** decline a foreign device's SzpontRequest unless it runs it via the
+  confined [zero-trust foreign path](13-foreign-execution.md) — it MUST NOT run
+  foreign work directly on the host.
 - **SHOULD** rank dispatch targets `surplus-first` and MUST fall back to
   weakest-first ordering when surpluses tie (including the all-neutral case).
 - **MAY** advertise `stats`; a node that doesn't is treated as surplus 0 and ranks

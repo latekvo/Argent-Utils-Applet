@@ -27,6 +27,12 @@ A node fills one or more roles. Requirements scale with the roles claimed.
   the role MUST still drop the `work-claim` message and keep the link ([09
   rule 2](09-extensibility.md#the-compatibility-contract)); the two interoperate,
   they just don't deduplicate against each other.
+- **Confined-Executor** / **Result-Originator** (optional): an Executor that runs a
+  **foreign** request's compute [confined and response-only](13-foreign-execution.md#conformance)
+  and returns a `job-result`, and/or a Dispatcher that acts on a returned result
+  under its own identity (`job-ack`ing it, acting at most once). A node that omits the
+  role declines foreign requests and MUST still drop the `job-result`/`job-ack`
+  messages and keep the link.
 
 ## Minimal node
 
@@ -186,6 +192,24 @@ For the [Originator-with-dedup](#roles) role, over two live nodes:
   over. (The reference asserts the live path in
   `test_work_claim_dedupes_origination_and_frees_on_owner_death` and the logic in
   `test_mesh_logic.py`'s work-claims section.)
+
+### V7 - foreign zero-trust execution (real sockets, optional role)
+
+For the [Confined-Executor / Result-Originator](#roles) roles, over two live nodes
+where the requester is **foreign** to the executor (the executor trusts only itself)
+and the executor has a confinement runner configured:
+
+- the executor **accepts** (`spawned`) rather than declining, and runs the compute in
+  the confinement runner (**not** the host spawn path) on the response-only prompt;
+- the executor returns the computed artifact as a **signed** `job-result` on the
+  requester's link; the requester **`job-ack`s** it and performs the social action
+  itself, under its own identity, **exactly once**;
+- a `job-result` from the **wrong link**, or a keyed executor's result with a
+  **bad/absent signature**, is **dropped** (no ack, no action);
+- the executor **re-sends** the unacked result until the ack lands, then stops. (The
+  reference asserts the live path in
+  `test_foreign_request_runs_confined_and_routes_result_back` and the logic in
+  `test_mesh_logic.py`'s foreign-execution section.)
 
 ## Interop checklist (quick)
 
