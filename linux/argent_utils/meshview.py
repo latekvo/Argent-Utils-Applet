@@ -18,7 +18,7 @@ wrappers (those run the control-socket calls off the UI thread).
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -47,6 +47,22 @@ _LINK_COLOR = {"up": "#34C759", "stale": "#FF9500", "down": "#FF3B30"}
 _TOKEN_GLYPH = {t["id"]: t.get("linuxGlyph", t["emoji"]) for t in core.mesh()["tokens"]}
 _TOKEN_COLOR = {t["id"]: t["colorHex"] for t in core.mesh()["tokens"]}
 _TOKEN_ORDER = [t["id"] for t in core.mesh()["tokens"]]
+# Trust levels (personal/foreign) — the toggle vocabulary, from the shared model.
+_TRUST_META = {t["id"]: t for t in core.mesh()["trust"]["levels"]}
+
+
+def _fmt_dur(secs: float | None) -> str:
+    """Compact human duration: 5s / 3m / 2h / 1d. Used for link uptime + 'seen'."""
+    if secs is None:
+        return "?"
+    s = int(secs)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h"
+    return f"{s // 86400}d"
 
 
 def _clear_layout(layout) -> None:
@@ -226,6 +242,22 @@ class MeshView(QWidget):
 
         col.addLayout(self._build_header())
 
+        # Animated "scanning the LAN" banner — shown while the node is starting or
+        # still discovering peers, so establishing the mesh isn't a silent ~20s wait.
+        self.scan_banner = QLabel("")
+        self.scan_banner.setStyleSheet(
+            "color: #30B0C7; font-size: 10px; font-weight: 600;"
+            " background-color: rgba(48,176,199,0.10); border-radius: 6px;"
+            " padding: 4px 8px;"
+        )
+        self.scan_banner.setVisible(False)
+        col.addWidget(self.scan_banner)
+        self._scan_phase = 0
+        self._scan_base = ""
+        self._scan_timer = QTimer(self)
+        self._scan_timer.setInterval(500)
+        self._scan_timer.timeout.connect(self._tick_scan)
+
         # Empty/off state host (shown instead of the graph/cards when there's no
         # live topology to render).
         self.state_host = QWidget()
@@ -339,6 +371,7 @@ class MeshView(QWidget):
 
         # Off / empty / dead states — no live topology to render.
         if not self.store.mesh_enabled:
+            self._set_scan(None)
             self._show_state(glyphs.G_MESH, "Mesh is off",
                              "Enable it in ⚙ Settings to coordinate duties with "
                              "other machines on this LAN.", None)
@@ -347,11 +380,13 @@ class MeshView(QWidget):
             return
         if state is None:
             self._show_state("⧗", "Starting mesh node…",
-                             "Discovering peers on the LAN.", None)
+                             "Binding the discovery socket and beaconing.", None)
             self._set_status("#FF9500", "starting")
+            self._set_scan("Starting the mesh node")
             self.node_count.setText("")
             return
         if not running:
+            self._set_scan(None)
             self._show_state("⊘", "Mesh node not running.",
                              "The node process is gone. Start it to rejoin the mesh.",
                              "Start")
@@ -369,12 +404,46 @@ class MeshView(QWidget):
         self.node_count.setText(str(1 + len(peers)))
         self._set_status("#34C759", "live")
 
+        # Still finding the fleet? Keep an animated, elapsed-timed banner up so a
+        # slow first link reads as "scanning", not a frozen empty graph.
+        linking = int(state.get("linking") or 0)
+        if not peers or linking:
+            elapsed = self_node.get("uptimeSecs")
+            elapsed_txt = f" ({_fmt_dur(elapsed)})" if isinstance(elapsed, (int, float)) else ""
+            if linking:
+                self._set_scan(f"Linking to {linking} machine{'s' if linking != 1 else ''}")
+            else:
+                self._set_scan(f"Scanning the LAN for machines{elapsed_txt}")
+        else:
+            self._set_scan(None)
+
         self._rebuild_nodes(self_node, peers)
         self._rebuild_duties(state, self_node, peers)
 
     def _set_status(self, color: str, text: str) -> None:
         self.status_dot.setStyleSheet(f"color: {color}; font-size: 10px;")
         self.status_text.setText(text)
+
+    def _set_scan(self, base: str | None) -> None:
+        """Show/hide the animated scanning banner. ``base`` is the message stem; the
+        timer appends cycling dots so it visibly pulses between 2s snapshots."""
+        if base is None:
+            self._scan_timer.stop()
+            self.scan_banner.setVisible(False)
+            return
+        self._scan_base = base
+        self.scan_banner.setVisible(True)
+        if not self._scan_timer.isActive():
+            self._scan_phase = 0
+            self._scan_timer.start()
+        self._render_scan()
+
+    def _tick_scan(self) -> None:
+        self._scan_phase = (self._scan_phase + 1) % 4
+        self._render_scan()
+
+    def _render_scan(self) -> None:
+        self.scan_banner.setText(f"⧗ {self._scan_base}{'.' * self._scan_phase}")
 
     def _show_state(self, glyph: str, title: str, detail: str,
                     button: str | None) -> None:
@@ -415,10 +484,20 @@ class MeshView(QWidget):
         for peer in sorted(peers, key=lambda p: (p.get("name") or "").lower()):
             self.nodes_col.addWidget(self._node_card(peer, peer))
 
+        # When no device is trusted yet, every peer is Personal by default — say so,
+        # so the trust toggles don't look inert (marking one Personal seeds the list).
+        trusted = (self.store.mesh_state or {}).get("trusted") or []
+        if peers and not trusted:
+            hint = QLabel("No trust allowlist yet — every peer is treated as Personal. "
+                          "Mark one Personal to start restricting the rest.")
+            hint.setWordWrap(True)
+            hint.setStyleSheet("color: palette(mid); font-size: 8px;")
+            self.nodes_col.addWidget(hint)
+
     def _node_card(self, node: dict, peer: dict | None) -> QWidget:
-        """One node row: platform chip + name + self/link badge + addr, and inline
-        tier / token editors. ``peer`` is None for self, else the peer dict (its
-        link/addr live there)."""
+        """One node row: platform chip + name + self/uptime badge + addr, and inline
+        strength / token editors (plus a trust toggle for peers). ``peer`` is None
+        for self, else the peer dict (its link/addr/trust live there)."""
         node_id = node.get("id", "")
         glyph, color = _platform_meta(node.get("platform", ""))
 
@@ -437,26 +516,7 @@ class MeshView(QWidget):
                       0, Qt.AlignmentFlag.AlignVCenter)
         name = ElidedLabel(node.get("name", "?"), 11, "#d8dbde")
         top.addWidget(name, 1)
-
-        if peer is None:
-            badge = QLabel("self")
-            badge.setStyleSheet(
-                "color: #34C759; font-weight: 700; font-size: 8px;"
-                f" background-color: {tint_bg('#34C759', 0.15)}; border-radius: 6px;"
-                " padding: 1px 5px;"
-            )
-        else:
-            link = peer.get("link", "down")
-            lcolor = _LINK_COLOR.get(link, "#8E8E93")
-            ago = peer.get("lastSeenSecsAgo")
-            ago_txt = f" {int(ago)}s" if isinstance(ago, (int, float)) else ""
-            badge = QLabel(f"{link}{ago_txt}")
-            badge.setStyleSheet(
-                f"color: {lcolor}; font-weight: 700; font-size: 8px;"
-                f" background-color: {tint_bg(lcolor, 0.15)}; border-radius: 6px;"
-                " padding: 1px 5px;"
-            )
-        top.addWidget(badge)
+        top.addWidget(self._status_badge(peer))
         outer.addLayout(top)
 
         # Addr line (peers only — self has no remote addr)
@@ -467,72 +527,157 @@ class MeshView(QWidget):
             )
             outer.addWidget(addr)
 
-        # Editors row: tier stepper + token selector. Both edit ANY node.
+        # Editors row: strength + token, both auto by default, both edit ANY node.
         editors = QHBoxLayout()
         editors.setSpacing(8)
-        editors.addLayout(self._tier_editor(node_id, int(node.get("tier", 3))))
-        editors.addWidget(self._token_editor(node_id, node.get("tokens", "ok")))
+        editors.addWidget(self._strength_editor(
+            node_id, int(node.get("tier", 3)), bool(node.get("strengthAuto", True))))
+        editors.addWidget(self._token_editor(
+            node_id, node.get("tokens", "ok"), node.get("tokensPct"),
+            bool(node.get("tokensAuto", True))))
         editors.addStretch(1)
         outer.addLayout(editors)
+
+        # Trust toggle (peers only — self is always "you").
+        if peer is not None:
+            outer.addLayout(self._trust_toggle(peer))
         return card
 
-    def _tier_editor(self, node_id: str, tier: int) -> QHBoxLayout:
-        lo, hi, _ = mesh_config.tier_bounds()
-        row = QHBoxLayout()
-        row.setSpacing(3)
-
-        def step_btn(glyph: str) -> QToolButton:
-            b = QToolButton()
-            b.setText(glyph)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
+    def _status_badge(self, peer: dict | None) -> QLabel:
+        """'self' for the local node; for a peer, the connection UPTIME while linked
+        ('up 3m', counting up) or 'down · seen 2m ago' once the link is lost — so the
+        number is a meaningful, increasing clock, not the old always-~0 'up 0s'."""
+        if peer is None:
+            b = QLabel("self")
             b.setStyleSheet(
-                "QToolButton { border: none; color: palette(mid); font-size: 12px;"
-                " font-weight: 700; padding: 0 3px; }"
-                "QToolButton:hover { color: palette(text); }"
+                "color: #34C759; font-weight: 700; font-size: 8px;"
+                f" background-color: {tint_bg('#34C759', 0.15)}; border-radius: 6px;"
+                " padding: 1px 5px;"
+            )
+            return b
+        link = peer.get("link", "down")
+        lcolor = _LINK_COLOR.get(link, "#8E8E93")
+        if link in ("up", "stale"):
+            up = peer.get("uptimeSecs")
+            text = f"{link} {_fmt_dur(up)}" if isinstance(up, (int, float)) else link
+            tip = "Connected — time since the link came up."
+        else:
+            ago = peer.get("lastSeenSecsAgo")
+            text = (f"down · seen {_fmt_dur(ago)} ago"
+                    if isinstance(ago, (int, float)) else "down")
+            tip = "Link lost — how long since this peer was last heard from."
+        b = QLabel(text)
+        b.setToolTip(tip)
+        b.setStyleSheet(
+            f"color: {lcolor}; font-weight: 700; font-size: 8px;"
+            f" background-color: {tint_bg(lcolor, 0.15)}; border-radius: 6px;"
+            " padding: 1px 5px;"
+        )
+        return b
+
+    def _strength_editor(self, node_id: str, tier: int, auto: bool) -> QComboBox:
+        """Machine-strength picker in plain words. 'Auto' (the default) tracks the
+        hardware-detected tier; picking a word pins it. 1 = strongest."""
+        lo, hi, _ = mesh_config.tier_bounds()
+        combo = QComboBox()
+        combo.setStyleSheet("font-size: 10px;")
+        # Item 0: Auto, showing the currently-detected word so it's never a mystery.
+        combo.addItem(f"Auto · {mesh_config.tier_label(tier)}", "auto")
+        for t in range(lo, hi + 1):
+            combo.addItem(mesh_config.tier_label(t), t)
+        combo.setCurrentIndex(0 if auto else max(0, combo.findData(tier)))
+        combo.setToolTip(
+            "Machine strength — how much compute this node has, auto-detected from "
+            "RAM/CPU/GPU (1 = strongest). 'weakest-first' routing keeps strong "
+            "machines free; pick a word to pin it, or Auto to re-detect."
+        )
+        combo.activated.connect(
+            lambda _i, c=combo: self._edit_strength(node_id, c.currentData())
+        )
+        return combo
+
+    def _edit_strength(self, node_id: str, data) -> None:
+        if data == "auto":
+            self.store.mesh_set_attr(node_id, {"strengthAuto": True})
+        else:
+            self.store.mesh_set_attr(node_id, {"tier": int(data)})
+
+    def _token_editor(self, node_id: str, tokens: str, pct, auto: bool) -> QComboBox:
+        """Token-budget picker. 'Auto' (default) shows the state derived from the
+        machine's real recent Claude usage + a live 'NN%' remaining; the mesh routes
+        around 'out' nodes. Picking ok/low/out pins the state (a pause escape)."""
+        combo = QComboBox()
+        combo.setStyleSheet("font-size: 10px;")
+        pct_txt = f" · {round(pct * 100)}%" if isinstance(pct, (int, float)) else ""
+        combo.addItem(f"{_TOKEN_GLYPH.get(tokens, '●')} Auto{pct_txt}", "auto")
+        combo.setItemData(0, QColor(_TOKEN_COLOR.get(tokens, "#8E8E93")),
+                          Qt.ItemDataRole.ForegroundRole)
+        for tid in _TOKEN_ORDER:  # ok / low / out
+            idx = combo.count()
+            combo.addItem(f"{_TOKEN_GLYPH[tid]} {tid}", tid)
+            combo.setItemData(idx, QColor(_TOKEN_COLOR[tid]), Qt.ItemDataRole.ForegroundRole)
+        combo.setCurrentIndex(0 if auto else max(0, combo.findData(tokens)))
+        combo.setToolTip(
+            "Token budget — auto-measured from this machine's recent Claude usage "
+            "(NN% of a per-plan ceiling remaining). The mesh skips 'out' nodes; pick "
+            "a value to pin it, or Auto to track real usage."
+        )
+        combo.activated.connect(
+            lambda _i, c=combo: self.store.mesh_set_attr(node_id, {"tokens": c.currentData()})
+        )
+        return combo
+
+    def _trust_toggle(self, peer: dict) -> QHBoxLayout:
+        """A Personal | Foreign segmented toggle for a peer's device. 'Personal' adds
+        its proven key fingerprint to the local allowlist (its mesh requests then run
+        here as if triggered locally); 'Foreign' removes it. Disabled until the peer
+        proves a device key, since trust must key on a verified fingerprint."""
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        lbl = QLabel("trust")
+        lbl.setStyleSheet("color: palette(mid); font-size: 9px;")
+        row.addWidget(lbl)
+
+        current = peer.get("trust", "personal")
+        fp = peer.get("fingerprint", "")
+        verified = bool(peer.get("verified"))
+        name = peer.get("name", "")
+
+        def seg(level: str) -> QToolButton:
+            meta = _TRUST_META.get(level, {})
+            b = QToolButton()
+            b.setText(f"{meta.get('linuxGlyph', '')} {level}".strip())
+            b.setCheckable(True)
+            b.setChecked(current == level)
+            b.setEnabled(bool(fp))
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            active = current == level
+            color = meta.get("colorHex", "#8E8E93")
+            b.setStyleSheet(
+                "QToolButton { border: none; font-size: 9px; font-weight: 700;"
+                f" padding: 1px 6px; border-radius: 6px; color: {color if active else 'palette(mid)'};"
+                f" background-color: {tint_bg(color, 0.18) if active else 'transparent'}; }}"
                 "QToolButton:disabled { color: rgba(128,128,128,0.35); }"
             )
             return b
 
-        minus = step_btn("−")
-        minus.setEnabled(tier > lo)
-        minus.clicked.connect(
-            lambda: self.store.mesh_set_attr(node_id, {"tier": max(lo, tier - 1)})
-        )
-        row.addWidget(minus)
+        personal = seg("personal")
+        personal.clicked.connect(lambda: self.store.mesh_trust(fp, name))
+        foreign = seg("foreign")
+        foreign.clicked.connect(lambda: self.store.mesh_untrust(fp))
+        row.addWidget(personal)
+        row.addWidget(foreign)
+        row.addStretch(1)
 
-        label = QLabel(f"tier {tier}")
-        label.setStyleSheet("font-size: 10px; font-family: monospace;")
-        label.setToolTip("Machine strength (1 = strongest)")
-        row.addWidget(label)
-
-        plus = step_btn("+")
-        plus.setEnabled(tier < hi)
-        plus.clicked.connect(
-            lambda: self.store.mesh_set_attr(node_id, {"tier": min(hi, tier + 1)})
-        )
-        row.addWidget(plus)
+        if not fp:
+            personal.setToolTip("This device hasn't proven a key yet.")
+        elif not verified:
+            note = QLabel("(unverified key)")
+            note.setStyleSheet("color: palette(mid); font-size: 8px;")
+            note.setToolTip("The peer advertises this key but hasn't yet signed our "
+                            "challenge — trust applies once it does.")
+            row.addWidget(note)
         return row
-
-    def _token_editor(self, node_id: str, tokens: str) -> QComboBox:
-        combo = QComboBox()
-        combo.setStyleSheet("font-size: 10px;")
-        for tid in _TOKEN_ORDER:
-            idx = combo.count()
-            combo.addItem(f"{_TOKEN_GLYPH[tid]} {tid}", tid)
-            # Tint the token glyph+label to its state colour (the combo used to
-            # carry a colour-emoji dot; keep that colour cue with a plain glyph).
-            combo.setItemData(idx, QColor(_TOKEN_COLOR[tid]), Qt.ItemDataRole.ForegroundRole)
-        idx = combo.findData(tokens)
-        if idx >= 0:
-            combo.setCurrentIndex(idx)
-        combo.setToolTip("Token budget state — the mesh routes around 'out' nodes")
-        # Only fire on a user-driven change (not the programmatic setCurrentIndex).
-        combo.activated.connect(
-            lambda _i, c=combo: self.store.mesh_set_attr(
-                node_id, {"tokens": c.currentData()}
-            )
-        )
-        return combo
 
     # MARK: duties
 

@@ -523,6 +523,35 @@ class Store(QObject):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def mesh_trust(self, fingerprint: str, label: str = "") -> None:
+        """Mark a peer's device Personal — add its proven fingerprint to the local
+        trusted allowlist (so its mesh requests run as if triggered here)."""
+        from .mesh import ctl
+
+        def work() -> None:
+            try:
+                ctl.trust_device(fingerprint, label)
+                self.mesh_error = None
+            except ctl.CtlError as exc:
+                self.mesh_error = str(exc)
+            self.refresh_mesh_state()
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def mesh_untrust(self, fingerprint: str) -> None:
+        """Mark a peer's device Foreign — remove its fingerprint from the allowlist."""
+        from .mesh import ctl
+
+        def work() -> None:
+            try:
+                ctl.untrust_device(fingerprint)
+                self.mesh_error = None
+            except ctl.CtlError as exc:
+                self.mesh_error = str(exc)
+            self.refresh_mesh_state()
+
+        threading.Thread(target=work, daemon=True).start()
+
     def mesh_set_overrides(self, duty: str, placement: dict) -> None:
         """Edit one duty's mesh-wide placement (gossiped last-writer-wins)."""
         from .mesh import ctl
