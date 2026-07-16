@@ -117,13 +117,15 @@ enum Render {
             // the content centers it and pads the snapshot with dead whitespace).
             let _ = seedSettings(store)
             SettingsView(isPresented: .constant(true))
-        case "mesh":
+        case let m where m.hasPrefix("mesh"):
             // The ⬡ Mesh screen over a synthetic topology (the macOS analogue of the
             // Linux render.py `mesh` fixture): a macOS self node, one strong healthy
             // Linux peer, one weak dead peer, the three duties with one platform
             // shortfall — plus the trust/accounting fields the node gossips since the
             // trust layer landed. Render mode never persists nor starts a node.
-            let _ = seedMesh(store)
+            // `mesh-blocked` additionally sets beaconBlocked, snapshotting the loud
+            // "device is not discoverable" banner.
+            let _ = seedMesh(store, blocked: m.contains("blocked"))
             MeshView(isPresented: .constant(true))
         case "unban-confirm":
             // Seed the ban list and open the inline "Unban @X?" confirmation on a row —
@@ -216,10 +218,11 @@ enum Render {
     /// pid makes `nodeRunning` read "live". Render mode never persists the enable nor
     /// starts a node (`Headless.isRender` guards in the Store).
     @discardableResult
-    private static func seedMesh(_ store: Store) -> Bool {
+    private static func seedMesh(_ store: Store, blocked: Bool = false) -> Bool {
         let selfID = "n-self-mbp", peerOK = "n-soft-strong", peerDead = "n-soft-weak"
         let json = """
         {"pid": \(getpid()), "tcpPort": 40878, "v": 1,
+         "beaconBlocked": \(blocked),
          "self": {"id": "\(selfID)", "name": "mbp", "platform": "macos", "tier": 2,
                   "tokens": "ok", "sees": ["\(peerOK)"],
                   "tokensAuto": true, "tokensPct": 0.64,

@@ -408,9 +408,14 @@ public struct MeshSnapshot: Decodable, Equatable {
     public let overrides: MeshOverrides?
     /// Peers mid-handshake right now — drives the "linking to N…" scanning banner.
     public let linking: Int
+    /// True while EVERY beacon send fails: the node is undiscoverable (typically an
+    /// OS privacy gate — macOS Local Network — denying LAN sends). Drives the loud
+    /// "device is not discoverable" banner so the mesh doesn't just look empty.
+    public let beaconBlocked: Bool
 
     enum CodingKeys: String, CodingKey {
-        case pid, tcpPort, selfNode = "self", peers, trusted, assignments, overrides, linking
+        case pid, tcpPort, selfNode = "self", peers, trusted, assignments, overrides, linking,
+             beaconBlocked
     }
 
     public init(from decoder: Decoder) throws {
@@ -423,6 +428,7 @@ public struct MeshSnapshot: Decodable, Equatable {
         assignments = (try? c.decode([String: MeshAssignment].self, forKey: .assignments)) ?? [:]
         overrides = try? c.decode(MeshOverrides.self, forKey: .overrides)
         linking = (try? c.decode(Int.self, forKey: .linking)) ?? 0
+        beaconBlocked = (try? c.decode(Bool.self, forKey: .beaconBlocked)) ?? false
     }
 
     /// Decode a snapshot from raw JSON bytes; nil for garbage/absent, matching

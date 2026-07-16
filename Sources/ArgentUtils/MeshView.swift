@@ -111,6 +111,12 @@ struct MeshView: View {
         let peers = store.meshState?.peers ?? []
         let linking = store.meshState?.linking ?? 0
         VStack(alignment: .leading, spacing: 8) {
+            // The node can't send a single beacon — the OS is blocking its LAN
+            // discovery, so peers can never find this machine and a dropped link
+            // won't re-form. Shout it; without this the mesh just looks empty.
+            if store.meshState?.beaconBlocked == true {
+                discoverabilityBanner
+            }
             // Still finding the fleet? Keep an animated, elapsed-timed banner up so a
             // slow first link reads as "scanning", not a frozen empty graph.
             if peers.isEmpty || linking > 0 {
@@ -135,6 +141,37 @@ struct MeshView: View {
         if linking > 0 { return "Linking to \(linking) machine\(linking == 1 ? "" : "s")…" }
         let elapsed = uptime.map { " (\(fmtDur($0)))" } ?? ""
         return "Scanning the LAN for machines\(elapsed)…"
+    }
+
+    /// The major-issue banner for a node whose every beacon send fails: macOS's
+    /// Local Network permission (or a firewall) is denying LAN sends, so this
+    /// machine is invisible to its peers. "Open" jumps straight to the settings
+    /// pane where Python must be allowed.
+    private var discoverabilityBanner: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.system(size: 15, weight: .bold)).foregroundStyle(.red)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("DEVICE IS NOT DISCOVERABLE")
+                    .font(.system(size: 11, weight: .heavy)).foregroundStyle(.red)
+                Text("macOS is blocking mesh discovery: allow “Python” in "
+                     + "Privacy & Security → Local Network, or peers can't find this machine.")
+                    .font(.system(size: 9)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 6)
+            Button("Open") { openLocalNetworkSettings() }
+                .buttonStyle(.borderedProminent).tint(.red).controlSize(.small)
+                .help("Open System Settings → Privacy & Security → Local Network")
+        }
+        .padding(.horizontal, 8).padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.red.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.red.opacity(0.45), lineWidth: 1))
+    }
+
+    private func openLocalNetworkSettings() {
+        let anchor = "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork"
+        if let url = URL(string: anchor) { NSWorkspace.shared.open(url) }
     }
 
     private func scanBanner(_ text: String) -> some View {

@@ -243,6 +243,23 @@ class MeshView(QWidget):
 
         col.addLayout(self._build_header())
 
+        # Major-issue banner for a node whose every beacon send fails (state.json
+        # `beaconBlocked`): the OS/firewall is denying LAN sends, so this machine is
+        # invisible to its peers and a dropped link won't re-form. Without this the
+        # mesh just looks inexplicably empty.
+        self.blocked_banner = QLabel(
+            "⚠ DEVICE IS NOT DISCOVERABLE — every discovery beacon send is failing "
+            "(OS privacy gate or firewall). Peers cannot find this machine."
+        )
+        self.blocked_banner.setWordWrap(True)
+        self.blocked_banner.setStyleSheet(
+            "color: #FF3B30; font-size: 10px; font-weight: 800;"
+            " background-color: rgba(255,59,48,0.12); border-radius: 6px;"
+            " border: 1px solid rgba(255,59,48,0.45); padding: 5px 8px;"
+        )
+        self.blocked_banner.setVisible(False)
+        col.addWidget(self.blocked_banner)
+
         # Animated "scanning the LAN" banner — shown while the node is starting or
         # still discovering peers, so establishing the mesh isn't a silent ~20s wait.
         self.scan_banner = QLabel("")
@@ -369,6 +386,11 @@ class MeshView(QWidget):
         self.err_line.setVisible(bool(self.store.mesh_error))
         if self.store.mesh_error:
             self.err_line.setText("⚠ " + self.store.mesh_error)
+
+        # The blocked banner only makes sense over a live node (a dead/off node is
+        # undiscoverable for a plainer reason the state hosts already explain).
+        self.blocked_banner.setVisible(
+            running and bool((state or {}).get("beaconBlocked")))
 
         # Off / empty / dead states — no live topology to render.
         if not self.store.mesh_enabled:
