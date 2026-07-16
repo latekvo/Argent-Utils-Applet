@@ -1209,6 +1209,24 @@ final class Store: ObservableObject {
         }
     }
 
+    /// Mark a peer's device Personal (trust) or Foreign (untrust) — add/remove its proven
+    /// fingerprint from the local allowlist. Mirrors the Linux `store.mesh_trust`/`mesh_untrust`.
+    func meshSetTrust(fingerprint: String, label: String, trusted: Bool) {
+        let port = meshState?.tcpPort ?? 0
+        Task { [weak self] in
+            let err: String? = await Task.detached(priority: .userInitiated) {
+                do {
+                    if trusted { try MeshBridge.trust(fingerprint: fingerprint, label: label, port: port) }
+                    else { try MeshBridge.untrust(fingerprint: fingerprint, port: port) }
+                    return nil
+                } catch { return (error as? LocalizedError)?.errorDescription ?? "\(error)" }
+            }.value
+            guard let self else { return }
+            self.meshError = err
+            await self.meshTick()
+        }
+    }
+
     /// Edit one duty's mesh-wide placement (gossiped last-writer-wins).
     func meshSetOverrides(duty: String, placement: MeshPlacement) {
         let port = meshState?.tcpPort ?? 0

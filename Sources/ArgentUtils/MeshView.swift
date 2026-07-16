@@ -7,11 +7,12 @@ import ArgentUtilsCore
 /// ⬡ is tapped.
 ///
 /// It renders the local node's public topology snapshot (`store.meshState`): a compact
-/// wire graph of self + peers, one editable card per node (tier / token state — edits
-/// apply to any node, self or peer, forwarded over the mesh so one machine configures
-/// the fleet), and the duty table (which job classes route where, with a live per-duty
-/// placement policy the panel edits and the mesh gossips last-writer-wins). Reads are a
-/// polled file decode; the write paths call the `store.mesh*` control wrappers.
+/// wire graph of self + peers, one editable card per node (machine strength in words +
+/// an auto-measured token budget + a Personal/Foreign trust toggle — edits apply to any
+/// node, self or peer, forwarded over the mesh so one machine configures the fleet), and
+/// the duty table (which job classes route where, with a live per-duty placement policy
+/// the panel edits and the mesh gossips last-writer-wins). Reads are a polled file decode;
+/// the write paths call the `store.mesh*` control wrappers.
 struct MeshView: View {
     @EnvironmentObject var store: Store
     @Binding var isPresented: Bool
@@ -108,7 +109,13 @@ struct MeshView: View {
     private var live: some View {
         let selfNode = store.meshState?.selfNode
         let peers = store.meshState?.peers ?? []
+        let linking = store.meshState?.linking ?? 0
         VStack(alignment: .leading, spacing: 8) {
+            // Still finding the fleet? Keep an animated, elapsed-timed banner up so a
+            // slow first link reads as "scanning", not a frozen empty graph.
+            if peers.isEmpty || linking > 0 {
+                scanBanner(scanText(uptime: selfNode?.uptimeSecs, linking: linking))
+            }
             TopologyGraph(selfNode: selfNode, peers: peers, platformMeta: platformMeta)
                 .frame(height: 190)
                 .frame(maxWidth: .infinity)
@@ -124,87 +131,182 @@ struct MeshView: View {
         }
     }
 
+    private func scanText(uptime: Double?, linking: Int) -> String {
+        if linking > 0 { return "Linking to \(linking) machine\(linking == 1 ? "" : "s")…" }
+        let elapsed = uptime.map { " (\(fmtDur($0)))" } ?? ""
+        return "Scanning the LAN for machines\(elapsed)…"
+    }
+
+    private func scanBanner(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.small).scaleEffect(0.7)
+            Text(text).font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color(hex: "#30B0C7") ?? .teal)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.teal.opacity(0.10)))
+    }
+
     // MARK: nodes column
 
     private func nodesColumn(selfNode: MeshNode?, peers: [MeshPeer]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             sectionLabel("NODES")
-            if let s = selfNode {
-                nodeCard(id: s.id, name: s.name, platform: s.platform, tier: s.tier,
-                         tokens: s.tokens, link: nil, addr: nil)
-            }
+            if let s = selfNode { nodeCard(node: s, peer: nil) }
             ForEach(peers.sorted { $0.name.lowercased() < $1.name.lowercased() }, id: \.id) { p in
-                nodeCard(id: p.id, name: p.name, platform: p.platform, tier: p.tier,
-                         tokens: p.tokens, link: p.link, addr: p.addr, lastSeen: p.lastSeenSecsAgo)
+                nodeCard(node: nil, peer: p)
             }
         }
         .padding(7)
         .background(RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.07)))
     }
 
-    private func nodeCard(id: String, name: String, platform: String, tier: Int, tokens: String,
-                          link: String?, addr: String?, lastSeen: Double? = nil) -> some View {
-        let meta = platformMeta(platform)
+    /// One node row. Exactly one of `node` (self) / `peer` is non-nil; the common
+    /// attributes are read from whichever is present. Split into small typed subviews
+    /// so the SwiftUI type-checker doesn't choke on one big builder.
+    private func nodeCard(node: MeshNode?, peer: MeshPeer?) -> some View {
+        let id = peer?.id ?? node?.id ?? ""
+        let name = peer?.name ?? node?.name ?? "?"
+        let platform = peer?.platform ?? node?.platform ?? "unknown"
+        let tier = peer?.tier ?? node?.tier ?? 3
+        let tokens = peer?.tokens ?? node?.tokens ?? "ok"
+        let strengthAuto = peer?.strengthAuto ?? node?.strengthAuto ?? true
+        let tokensAuto = peer?.tokensAuto ?? node?.tokensAuto ?? true
+        let tokensPct = peer?.tokensPct ?? node?.tokensPct ?? 1.0
         return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Text(meta.glyph).font(.system(size: 13))
-                    .frame(width: 20, height: 20)
-                    .background(RoundedRectangle(cornerRadius: 5).fill(meta.color.opacity(0.2)))
-                Text(name).font(.caption).lineLimit(1)
-                Spacer(minLength: 4)
-                if link == nil {
-                    badge("self", .green)
-                } else {
-                    let ago = lastSeen.map { " \(Int($0))s" } ?? ""
-                    badge("\(link ?? "down")\(ago)", linkColor(link ?? "down"))
-                }
-            }
-            if let addr, !addr.isEmpty {
+            nodeHeaderRow(name: name, platform: platform, peer: peer)
+            if let addr = peer?.addr, !addr.isEmpty {
                 Text(addr).font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
             }
             HStack(spacing: 10) {
-                tierEditor(nodeID: id, tier: tier)
-                tokenEditor(nodeID: id, tokens: tokens)
+                strengthEditor(nodeID: id, tier: tier, auto: strengthAuto)
+                tokenEditor(nodeID: id, tokens: tokens, tokensPct: tokensPct, auto: tokensAuto)
                 Spacer(minLength: 0)
             }
+            if let peer { trustToggle(peer) }
         }
         .padding(6)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.06)))
     }
 
-    private func tierEditor(nodeID: String, tier: Int) -> some View {
-        let bounds = catalog?.tierBounds ?? (min: 1, max: 5, default: 3)
-        return HStack(spacing: 3) {
-            Button { store.meshSetAttr(nodeID: nodeID, attrs: ["tier": max(bounds.min, tier - 1)]) } label: {
-                Image(systemName: "minus").font(.system(size: 9, weight: .bold))
-            }
-            .buttonStyle(.borderless).disabled(tier <= bounds.min)
-            Text("tier \(tier)").font(.system(size: 10, design: .monospaced))
-                .help("Machine strength (1 = strongest)")
-            Button { store.meshSetAttr(nodeID: nodeID, attrs: ["tier": min(bounds.max, tier + 1)]) } label: {
-                Image(systemName: "plus").font(.system(size: 9, weight: .bold))
-            }
-            .buttonStyle(.borderless).disabled(tier >= bounds.max)
+    private func nodeHeaderRow(name: String, platform: String, peer: MeshPeer?) -> some View {
+        let meta = platformMeta(platform)
+        return HStack(spacing: 6) {
+            Text(meta.glyph).font(.system(size: 13))
+                .frame(width: 20, height: 20)
+                .background(RoundedRectangle(cornerRadius: 5).fill(meta.color.opacity(0.2)))
+            Text(name).font(.caption).lineLimit(1)
+            Spacer(minLength: 4)
+            statusBadge(peer)
         }
     }
 
-    private func tokenEditor(nodeID: String, tokens: String) -> some View {
-        let ids = catalog?.tokens.map { $0.id } ?? ["ok", "low", "out"]
+    /// 'self' for the local node; for a peer, the connection UPTIME while linked
+    /// ('up 3m', counting up) or 'down · seen 2m ago' — a meaningful clock, not 'up 0s'.
+    private func statusBadge(_ peer: MeshPeer?) -> some View {
+        guard let peer else { return AnyView(badge("self", .green)) }
+        let text: String
+        if peer.link == "up" || peer.link == "stale" {
+            text = peer.uptimeSecs.map { "\(peer.link) \(fmtDur($0))" } ?? peer.link
+        } else {
+            text = peer.lastSeenSecsAgo.map { "down · seen \(fmtDur($0)) ago" } ?? "down"
+        }
+        return AnyView(badge(text, linkColor(peer.link)))
+    }
+
+    /// Machine-strength picker in plain words. 'Auto' (default) tracks the hardware-
+    /// detected tier; picking a word pins it (1 = strongest).
+    private func strengthEditor(nodeID: String, tier: Int, auto: Bool) -> some View {
+        let bounds = catalog?.tierBounds ?? (min: 1, max: 5, default: 3)
+        let cat = catalog
+        let autoLabel = "Auto · " + (cat?.tierLabel(tier) ?? "tier \(tier)")
         return Picker("", selection: Binding(
-            get: { tokens },
-            set: { newValue in
-                if newValue != tokens { store.meshSetAttr(nodeID: nodeID, attrs: ["tokens": newValue]) }
+            get: { auto ? "auto" : String(tier) },
+            set: { sel in
+                if sel == "auto" {
+                    store.meshSetAttr(nodeID: nodeID, attrs: ["strengthAuto": true])
+                } else if let t = Int(sel) {
+                    store.meshSetAttr(nodeID: nodeID, attrs: ["tier": t])
+                }
             }
         )) {
-            ForEach(ids, id: \.self) { tid in
-                let m = tokenMeta(tid)
-                Text("\(m.glyph) \(tid)").tag(tid)
+            Text(autoLabel).tag("auto")
+            ForEach(bounds.min...bounds.max, id: \.self) { t in
+                Text(cat?.tierLabel(t) ?? "tier \(t)").tag(String(t))
             }
         }
-        .labelsHidden()
-        .pickerStyle(.menu)
-        .frame(width: 96)
-        .help("Token budget state — the mesh routes around 'out' nodes")
+        .labelsHidden().pickerStyle(.menu).frame(maxWidth: 150)
+        .help("Machine strength — auto-detected from RAM/CPU/GPU (1 = strongest). "
+              + "'weakest-first' routing keeps strong machines free; pick a word to pin it.")
+    }
+
+    /// Token-budget picker. 'Auto' (default) shows the state derived from real recent
+    /// Claude usage + a live 'NN%' remaining; picking ok/low/out pins it (a pause escape).
+    private func tokenEditor(nodeID: String, tokens: String, tokensPct: Double, auto: Bool) -> some View {
+        let ids = catalog?.tokens.map { $0.id } ?? ["ok", "low", "out"]
+        let pct = Int((tokensPct * 100).rounded())
+        let autoLabel = "\(tokenMeta(tokens).glyph) Auto · \(pct)%"
+        return Picker("", selection: Binding(
+            get: { auto ? "auto" : tokens },
+            set: { sel in store.meshSetAttr(nodeID: nodeID, attrs: ["tokens": sel]) }
+        )) {
+            Text(autoLabel).tag("auto")
+            ForEach(ids, id: \.self) { tid in
+                Text("\(tokenMeta(tid).glyph) \(tid)").tag(tid)
+            }
+        }
+        .labelsHidden().pickerStyle(.menu).frame(width: 118)
+        .help("Token budget — auto-measured from this machine's recent Claude usage "
+              + "(NN% of a per-plan ceiling left). The mesh skips 'out' nodes; pick a value to pin.")
+    }
+
+    /// Personal | Foreign trust toggle for a peer's device. 'Personal' adds its proven
+    /// fingerprint to the local allowlist; 'Foreign' removes it. Disabled until the peer
+    /// proves a device key (trust must key on a verified fingerprint).
+    private func trustToggle(_ peer: MeshPeer) -> some View {
+        let hasKey = !peer.fingerprint.isEmpty
+        let personal = peer.trust == "personal"
+        return HStack(spacing: 4) {
+            Text("trust").font(.system(size: 9)).foregroundStyle(.secondary)
+            trustSeg("personal", active: personal, enabled: hasKey) {
+                store.meshSetTrust(fingerprint: peer.fingerprint, label: peer.name, trusted: true)
+            }
+            trustSeg("foreign", active: !personal, enabled: hasKey) {
+                store.meshSetTrust(fingerprint: peer.fingerprint, label: peer.name, trusted: false)
+            }
+            Spacer(minLength: 0)
+            if !hasKey {
+                Text("(no key yet)").font(.system(size: 8)).foregroundStyle(.secondary)
+            } else if !peer.verified {
+                Text("(unverified)").font(.system(size: 8)).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func trustSeg(_ level: String, active: Bool, enabled: Bool,
+                          _ action: @escaping () -> Void) -> some View {
+        let color = trustColor(level)
+        return Button(action: action) {
+            Text(level).font(.system(size: 9, weight: .bold))
+                .foregroundStyle(active ? color : Color.secondary)
+                .padding(.horizontal, 6).padding(.vertical, 1)
+                .background(Capsule().fill(active ? color.opacity(0.18) : Color.clear))
+        }
+        .buttonStyle(.borderless).disabled(!enabled)
+    }
+
+    private func trustColor(_ level: String) -> Color {
+        if let hex = catalog?.trustLevel(level)?.colorHex, let c = Color(hex: hex) { return c }
+        return level == "personal" ? .green : .gray
+    }
+
+    private func fmtDur(_ secs: Double) -> String {
+        let s = Int(secs)
+        if s < 60 { return "\(s)s" }
+        if s < 3600 { return "\(s / 60)m" }
+        if s < 86400 { return "\(s / 3600)h" }
+        return "\(s / 86400)d"
     }
 
     // MARK: duties column

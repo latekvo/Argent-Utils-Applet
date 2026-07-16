@@ -446,18 +446,23 @@ class Store(QObject):
         if old is None or new is None:
             return old is not new  # None→dict or dict→None is always meaningful
 
+        # Fields that tick/drift every write on their own — dropping them keeps an
+        # idle mesh from firing a rebuild (which tears down an open combo the user is
+        # editing) twice a second. Link state (up/stale/down) and the token STATE
+        # still live in the peer dict, so genuine transitions still repaint; only the
+        # continuously-moving numbers (uptime, quota %) are ignored.
+        _tick_top = ("updatedAt", "pid")
+        _tick_node = ("lastSeenSecsAgo", "uptimeSecs", "tokensPct")
+
         def strip(snap: dict) -> dict:
-            # Drop the fields that tick every write on their own — the wall-clock
-            # stamp and each peer's "seen N.Ns ago" — so an idle mesh doesn't fire
-            # a rebuild (which would tear down an open combo the user is editing)
-            # twice a second. The *link state* (up/stale/down) still lives in the
-            # peer dict, so a genuine liveness transition still repaints.
-            out = {k: v for k, v in snap.items() if k not in ("updatedAt", "pid")}
+            out = {k: v for k, v in snap.items() if k not in _tick_top}
+            me = out.get("self")
+            if isinstance(me, dict):
+                out["self"] = {k: v for k, v in me.items() if k not in _tick_node}
             peers = out.get("peers")
             if isinstance(peers, list):
                 out["peers"] = [
-                    {k: v for k, v in p.items() if k != "lastSeenSecsAgo"}
-                    for p in peers
+                    {k: v for k, v in p.items() if k not in _tick_node} for p in peers
                 ]
             return out
 

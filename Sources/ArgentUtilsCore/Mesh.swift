@@ -34,7 +34,19 @@ public struct MeshCatalog: Decodable, Equatable {
         public let max: Int
         /// `default` is a Swift keyword — mapped from the JSON key.
         public let defaultTier: Int
-        enum CodingKeys: String, CodingKey { case min, max, defaultTier = "default" }
+        /// Human words per strength level ("1" → "Very strong", …), optional.
+        public let labels: [String: String]?
+        enum CodingKeys: String, CodingKey { case min, max, defaultTier = "default", labels }
+    }
+    /// A trust classification (personal / foreign) — the toggle vocabulary.
+    public struct TrustLevel: Decodable, Equatable {
+        public let id: String
+        public let title: String
+        public let linuxGlyph: String?
+        public let colorHex: String
+    }
+    public struct Trust: Decodable, Equatable {
+        public let levels: [TrustLevel]
     }
     public struct Strategy: Decodable, Equatable {
         public let id: String
@@ -64,6 +76,7 @@ public struct MeshCatalog: Decodable, Equatable {
     public let platforms: [Platform]
     public let tokens: [Token]
     public let tiers: Tiers
+    public let trust: Trust?
     public let strategies: [Strategy]
     public let duties: [Duty]
     public let defaultStrategy: String
@@ -73,9 +86,16 @@ public struct MeshCatalog: Decodable, Equatable {
         (tiers.min, tiers.max, tiers.defaultTier)
     }
 
+    /// Human word for a strength tier ("Very strong" … "Very light"), mirroring
+    /// `config.tier_label`; falls back to `tier N` if unlabelled.
+    public func tierLabel(_ tier: Int) -> String {
+        tiers.labels?[String(tier)] ?? "tier \(tier)"
+    }
+
     public func platform(_ id: String) -> Platform? { platforms.first { $0.id == id } }
     public func token(_ id: String) -> Token? { tokens.first { $0.id == id } }
     public func duty(_ id: String) -> Duty? { duties.first { $0.id == id } }
+    public func trustLevel(_ id: String) -> TrustLevel? { trust?.levels.first { $0.id == id } }
 
     /// The effective placement for a duty: the gossiped override if present, else the
     /// `core/mesh.json` default. Mirrors `config.placement_for`.
@@ -159,8 +179,21 @@ public struct MeshNode: Decodable, Equatable {
     public let platform: String
     public let tier: Int
     public let tokens: String
+    /// Whether the tier was auto-detected from hardware (vs pinned by an edit).
+    public let strengthAuto: Bool
+    /// Whether the token state is auto-derived from real usage (vs a manual pin).
+    public let tokensAuto: Bool
+    /// Fraction of the heuristic token budget still remaining (1.0 = fresh, 0.0 = out).
+    public let tokensPct: Double
+    /// Seconds this node has been running (self view) — nil when absent.
+    public let uptimeSecs: Double?
+    /// This node's device-key fingerprint (self view).
+    public let fingerprint: String
 
-    enum CodingKeys: String, CodingKey { case id, name, platform, tier, tokens }
+    enum CodingKeys: String, CodingKey {
+        case id, name, platform, tier, tokens, strengthAuto, tokensAuto, tokensPct,
+             uptimeSecs, fingerprint
+    }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -169,11 +202,29 @@ public struct MeshNode: Decodable, Equatable {
         platform = (try? c.decode(String.self, forKey: .platform)) ?? "unknown"
         tier = (try? c.decode(Int.self, forKey: .tier)) ?? 3
         tokens = (try? c.decode(String.self, forKey: .tokens)) ?? "ok"
+        strengthAuto = (try? c.decode(Bool.self, forKey: .strengthAuto)) ?? true
+        tokensAuto = (try? c.decode(Bool.self, forKey: .tokensAuto)) ?? true
+        tokensPct = (try? c.decode(Double.self, forKey: .tokensPct)) ?? 1.0
+        uptimeSecs = try? c.decode(Double.self, forKey: .uptimeSecs)
+        fingerprint = (try? c.decode(String.self, forKey: .fingerprint)) ?? ""
     }
 
-    public init(id: String, name: String, platform: String, tier: Int, tokens: String) {
+    public init(id: String, name: String, platform: String, tier: Int, tokens: String,
+                strengthAuto: Bool = true, tokensAuto: Bool = true, tokensPct: Double = 1.0,
+                uptimeSecs: Double? = nil, fingerprint: String = "") {
         self.id = id; self.name = name; self.platform = platform
         self.tier = tier; self.tokens = tokens
+        self.strengthAuto = strengthAuto; self.tokensAuto = tokensAuto
+        self.tokensPct = tokensPct; self.uptimeSecs = uptimeSecs; self.fingerprint = fingerprint
+    }
+
+    /// `uptimeSecs` ticks and `tokensPct` drifts on every snapshot write, so both are
+    /// excluded from equality — otherwise the change-detecting poll (see `Store`) would
+    /// fire twice a second on self's own uptime. Mirrors `MeshPeer.==`.
+    public static func == (a: MeshNode, b: MeshNode) -> Bool {
+        a.id == b.id && a.name == b.name && a.platform == b.platform && a.tier == b.tier
+            && a.tokens == b.tokens && a.strengthAuto == b.strengthAuto
+            && a.tokensAuto == b.tokensAuto && a.fingerprint == b.fingerprint
     }
 }
 
@@ -191,9 +242,21 @@ public struct MeshPeer: Decodable, Equatable {
     public let lastSeenSecsAgo: Double?
     /// Peer ids this peer reports it currently sees (drives the peer↔peer graph edges).
     public let sees: [String]
+    public let strengthAuto: Bool
+    public let tokensAuto: Bool
+    public let tokensPct: Double
+    /// Seconds the current link has been up ("up 3m") — nil while down.
+    public let uptimeSecs: Double?
+    /// This node's classification of the peer: "personal" | "foreign".
+    public let trust: String
+    /// The peer's device-key fingerprint (proven if `verified`, else merely claimed).
+    public let fingerprint: String
+    /// Whether the peer proved possession of its advertised key on the link.
+    public let verified: Bool
 
     enum CodingKeys: String, CodingKey {
-        case id, name, platform, tier, tokens, link, addr, lastSeenSecsAgo, sees
+        case id, name, platform, tier, tokens, link, addr, lastSeenSecsAgo, sees,
+             strengthAuto, tokensAuto, tokensPct, uptimeSecs, trust, fingerprint, verified
     }
 
     public init(from decoder: Decoder) throws {
@@ -207,15 +270,24 @@ public struct MeshPeer: Decodable, Equatable {
         addr = try? c.decode(String.self, forKey: .addr)
         lastSeenSecsAgo = try? c.decode(Double.self, forKey: .lastSeenSecsAgo)
         sees = (try? c.decode([String].self, forKey: .sees)) ?? []
+        strengthAuto = (try? c.decode(Bool.self, forKey: .strengthAuto)) ?? true
+        tokensAuto = (try? c.decode(Bool.self, forKey: .tokensAuto)) ?? true
+        tokensPct = (try? c.decode(Double.self, forKey: .tokensPct)) ?? 1.0
+        uptimeSecs = try? c.decode(Double.self, forKey: .uptimeSecs)
+        trust = (try? c.decode(String.self, forKey: .trust)) ?? "personal"
+        fingerprint = (try? c.decode(String.self, forKey: .fingerprint)) ?? ""
+        verified = (try? c.decode(Bool.self, forKey: .verified)) ?? false
     }
 
-    /// `lastSeenSecsAgo` ticks on every snapshot write, so it's excluded from equality:
-    /// a change-detecting poll (see `Store`) must not fire twice a second on an idle
-    /// mesh. The genuine liveness signal (`link`) is compared. Mirrors the Python
-    /// front-end's `_mesh_meaningfully_changed` strip.
+    /// `lastSeenSecsAgo`/`uptimeSecs` tick on every snapshot write, so they're excluded
+    /// from equality: a change-detecting poll (see `Store`) must not fire twice a second
+    /// on an idle mesh. The genuine signals (`link`, `trust`, token state) are compared.
+    /// Mirrors the Python front-end's `_mesh_meaningfully_changed` strip.
     public static func == (a: MeshPeer, b: MeshPeer) -> Bool {
         a.id == b.id && a.name == b.name && a.platform == b.platform && a.tier == b.tier
             && a.tokens == b.tokens && a.link == b.link && a.addr == b.addr && a.sees == b.sees
+            && a.strengthAuto == b.strengthAuto && a.tokensAuto == b.tokensAuto
+            && a.trust == b.trust && a.verified == b.verified
     }
 }
 
@@ -257,9 +329,11 @@ public struct MeshSnapshot: Decodable, Equatable {
     public let peers: [MeshPeer]
     public let assignments: [String: MeshAssignment]
     public let overrides: MeshOverrides?
+    /// Peers mid-handshake right now — drives the "linking to N…" scanning banner.
+    public let linking: Int
 
     enum CodingKeys: String, CodingKey {
-        case pid, tcpPort, selfNode = "self", peers, assignments, overrides
+        case pid, tcpPort, selfNode = "self", peers, assignments, overrides, linking
     }
 
     public init(from decoder: Decoder) throws {
@@ -270,6 +344,7 @@ public struct MeshSnapshot: Decodable, Equatable {
         peers = (try? c.decode([MeshPeer].self, forKey: .peers)) ?? []
         assignments = (try? c.decode([String: MeshAssignment].self, forKey: .assignments)) ?? [:]
         overrides = try? c.decode(MeshOverrides.self, forKey: .overrides)
+        linking = (try? c.decode(Int.self, forKey: .linking)) ?? 0
     }
 
     /// Decode a snapshot from raw JSON bytes; nil for garbage/absent, matching

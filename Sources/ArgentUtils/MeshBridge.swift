@@ -124,6 +124,18 @@ enum MeshBridge {
         _ = try request(["t": "stop"], port: port)
     }
 
+    /// Mark a peer's device Personal — add its proven fingerprint to the local trusted
+    /// allowlist. Mirrors `ctl.trust_device`.
+    static func trust(fingerprint: String, label: String, port: Int) throws {
+        _ = try request(["t": "trust", "fingerprint": fingerprint, "label": label], port: port)
+    }
+
+    /// Mark a peer's device Foreign — remove its fingerprint from the allowlist. Mirrors
+    /// `ctl.untrust_device`.
+    static func untrust(fingerprint: String, port: Int) throws {
+        _ = try request(["t": "untrust", "fingerprint": fingerprint], port: port)
+    }
+
     /// One command, one reply, over a fresh loopback TCP connection to the node's control
     /// port — the Swift port of `mesh.ctl.request`. Blocking; throws `MeshCtlError` when
     /// the node is unreachable, silent, or answers with an error.
