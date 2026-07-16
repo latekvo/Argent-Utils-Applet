@@ -19,6 +19,7 @@ Message types (``t``):
 - ``set-attr``  (TCP)  edit a node's local attrs (from a peer's panel or the CLI)
 - ``dispatch``  (TCP)  run a job on the receiving node
 - ``job-status``(TCP)  dispatch outcome: ``spawned`` | ``declined`` | ``failed`` (+ reason)
+- ``work-claim``(TCP)  gossiped, self-signed origination lease on a unit of work
 - ``status``    (TCP)  ctl request: reply with one ``state`` message (the snapshot)
 """
 
@@ -41,6 +42,10 @@ MAX_LINE_BYTES = 512 * 1024
 # implementation signs and verifies byte-identical input.
 _ADVERT_CONTEXT = b"szpontnet-nodeinfo-v1:"
 _OVERRIDES_CONTEXT = b"szpontnet-overrides-v1:"
+# A gossiped work-claim (an origination lease on a unit of work) is signed the
+# same way, under its own tag — so a claim signature can't be lifted onto an
+# advert/override or vice versa. See docs/szpontnet/12-work-claims.md.
+_CLAIM_CONTEXT = b"szpontnet-workclaim-v1:"
 
 
 def _canonical(payload: dict) -> bytes:
@@ -60,6 +65,12 @@ def advert_signing_bytes(node_dict: dict) -> bytes:
 def overrides_signing_bytes(overrides_dict: dict) -> bytes:
     """The exact bytes a placement-overrides `sig` covers (signed by `updatedBy`)."""
     return _OVERRIDES_CONTEXT + _canonical(overrides_dict)
+
+
+def claim_signing_bytes(claim_dict: dict) -> bytes:
+    """The exact bytes a work-claim's `sig` covers (signed by the claimant `node`
+    over the record's canonical form)."""
+    return _CLAIM_CONTEXT + _canonical(claim_dict)
 
 
 def _opt_frac(v: object) -> float | None:
@@ -236,6 +247,84 @@ class Job:
             return None
 
 
+# MARK: - Work claims (origination leases)
+
+
+@dataclass(frozen=True)
+class ClaimRecord:
+    """One node's self-signed lease on a unit of external work.
+
+    A work-claim deduplicates **origination**: when several nodes independently
+    observe the same external event (e.g. a review request on a PR), each derives
+    the same ``work_key`` and claims it; a deterministic rule (the lowest node id
+    among live, trusted, active claimants) elects a single owner and the losers
+    yield, with no negotiation round. The claim is a **liveness-scoped lease** — it
+    counts only while its claimant is a live node — so an owner that dies frees the
+    work for a survivor without any timer of its own. See
+    docs/szpontnet/12-work-claims.md.
+
+    ``pubkey`` is carried inline so the record is **self-authenticating**: a
+    receiver can verify ``sig`` (over the canonical bytes, [claim_signing_bytes])
+    without having first seen the claimant's advertisement, and relay it verbatim.
+    A keyless claim (no ``pubkey``) carries no ``sig`` and can never be
+    authoritative — exactly the keyless-advert degradation.
+    """
+
+    work_key: str
+    node: str  # claimant node id
+    pubkey: str = ""
+    epoch: float = 0.0  # claimant incarnation — aligns the lease with node liveness
+    seq: int = 0  # per-(node, work_key) counter; the freshest same-node record wins
+    state: str = "active"  # "active" | "released"
+    sig: str = ""
+
+    def to_dict(self) -> dict:
+        d = {
+            "workKey": self.work_key,
+            "node": self.node,
+            "epoch": self.epoch,
+            "seq": self.seq,
+            "state": self.state,
+        }
+        # Omit the crypto fields when empty so a keyless claim is compact and a
+        # signed one round-trips byte-stable (the sig covers the sig-less form).
+        if self.pubkey:
+            d["pubkey"] = self.pubkey
+        if self.sig:
+            d["sig"] = self.sig
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ClaimRecord | None":
+        if not isinstance(d, dict):
+            return None
+        work_key, node = str(d.get("workKey", "")), str(d.get("node", ""))
+        if not work_key or not node:
+            return None  # a claim without a key or a claimant is meaningless
+        try:
+            return cls(
+                work_key=work_key,
+                node=node,
+                pubkey=str(d.get("pubkey", "")),
+                epoch=float(d.get("epoch", 0.0)),
+                seq=int(d.get("seq", 0)),
+                state=str(d.get("state", "active")),
+                sig=str(d.get("sig", "")),
+            )
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def active(self) -> bool:
+        return self.state == "active"
+
+    def newer_than(self, other: "ClaimRecord") -> bool:
+        """Freshness for merging two records from the SAME claimant: a new
+        incarnation always wins, then the per-key update counter (mirrors
+        NodeInfo)."""
+        return (self.epoch, self.seq) > (other.epoch, other.seq)
+
+
 # MARK: - Envelope encode / decode
 
 
@@ -321,6 +410,13 @@ def node_update_raw(node_dict: dict) -> dict:
 
 def overrides_update(overrides_dict: dict) -> dict:
     return {"t": "overrides", "overrides": overrides_dict}
+
+
+def work_claim(claim_dict: dict) -> dict:
+    """Gossip a work-claim. Always sent VERBATIM — the exact signed dict, whether
+    minted here or relayed — so its signature (over that dict's canonical bytes)
+    survives every hop unchanged, just like a relayed advertisement."""
+    return {"t": "work-claim", "claim": claim_dict}
 
 
 def set_attr(target_id: str, attrs: dict) -> dict:

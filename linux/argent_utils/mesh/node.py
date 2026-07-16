@@ -35,6 +35,7 @@ import socket
 import struct
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import replace
 
 from .. import activity
@@ -56,6 +57,11 @@ _TOKEN_REFRESH_SECS = 30.0
 # A sane home/office LAN has a handful of machines; this only bounds a beacon
 # flood of spoofed ids from ballooning the peers table + snapshot, not real use.
 _MAX_PEERS = 256
+
+# Upper bound on stored work-claim records (work_key × claimant). Real use holds a
+# handful of in-flight work items; this only stops a gossip flood of spoofed
+# work_keys from ballooning the claim book without bound. See _store_claim.
+_MAX_CLAIMS = 4096
 
 # Domain-separation prefix for the trust proof-of-possession signature. The peer
 # signs this tag + the challenge nonce, never the bare nonce — so a captured
@@ -179,6 +185,16 @@ class MeshNode:
         # The trust challenge nonce THIS node issued on each link, keyed by writer,
         # so an inbound `auth` can be verified against the nonce we chose.
         self._issued_nonce: dict[asyncio.StreamWriter, str] = {}
+        # Work-claim book: work_key -> {claimant node id -> freshest ClaimRecord},
+        # plus our own per-key seq counter. A claim is an origination lease; the
+        # owner of a key is the lowest-id live+personal active claimant. See the
+        # work-claims section below and docs/szpontnet/12-work-claims.md.
+        self._claims: dict[str, dict[str, protocol.ClaimRecord]] = {}
+        self._claim_seq: dict[str, int] = {}
+        # Optional hook fired when a better (lower-id) peer preempts a work_key this
+        # node was originating, so a caller (e.g. an auto-poller) can abort the
+        # local work it started. None = no-op (the default; origination is manual).
+        self.on_claim_lost: Callable[[str], None] | None = None
 
     # MARK: - identity / gossip source of truth
 
@@ -741,6 +757,12 @@ class MeshNode:
         if t == "job-status":
             self._resolve_job_future(msg, writer)
             return None
+        if t == "work-claim":
+            # A gossiped origination lease. Authenticate it, merge by freshness,
+            # relay it, and yield our own claim if a better peer now owns the key.
+            self._on_work_claim(msg)
+            peer = self._peer_by_writer(writer)
+            return peer.info.id if peer else None
         return None
 
     def _peer_by_writer(self, writer: asyncio.StreamWriter) -> Peer | None:
@@ -931,6 +953,7 @@ class MeshNode:
                         self._drop_peer(pid, reason="heartbeat timeout")
                 elif self._reapable(peer, now):
                     del self.peers[pid]  # long dead / stale phantom — drop it
+                    self._forget_claims(pid)  # its origination leases lapse with it
 
     def _reapable(self, peer: "Peer", now: float) -> bool:
         """Whether an *unlinked* peer should be dropped from the snapshot: a peer
@@ -1029,6 +1052,171 @@ class MeshNode:
             with contextlib.suppress(ConnectionError, OSError):
                 peer.writer.write(protocol.encode(protocol.set_attr(target, attrs)))
 
+    # MARK: - work claims (leaderless origination leases)
+
+    def claim(self, work_key: str) -> bool:
+        """Try to become the originator for ``work_key``. Returns True if this node
+        should proceed (it already owns the key, or has now taken/announced it),
+        False if a **better** (lower-id) live, trusted peer already owns it — in
+        which case the caller MUST NOT originate.
+
+        This is the leaderless dedup: there is no query round. We consult the
+        current owner (a pure function of the gossiped claim book + live set), and
+        either announce our own active claim or stand down. A simultaneous double
+        claim is reconciled by :meth:`_maybe_yield` on the loser when it hears the
+        winner's claim. Owning the key already is idempotent — re-claiming just
+        re-asserts, so a legitimate retry by the owner is never suppressed."""
+        if not work_key:
+            return True
+        holder = self._claim_holder(work_key)
+        if holder is not None and holder != self.local.id and holder < self.local.id:
+            return False  # a lower-id live+trusted peer owns it → stand down
+        self._emit_claim(work_key, "active")
+        return True
+
+    def release(self, work_key: str) -> None:
+        """Voluntarily give up a key this node holds (work finished, or aborted),
+        freeing it for another node without waiting for this node to go down."""
+        if work_key and self._own_claim(work_key) is not None:
+            self._emit_claim(work_key, "released")
+
+    def _own_claim(self, work_key: str) -> protocol.ClaimRecord | None:
+        return self._claims.get(work_key, {}).get(self.local.id)
+
+    def _emit_claim(self, work_key: str, state: str) -> None:
+        """Mint, store, and gossip our own claim on ``work_key`` in ``state``,
+        bumping the per-key seq so it supersedes our previous record everywhere."""
+        seq = self._claim_seq.get(work_key, -1) + 1
+        self._claim_seq[work_key] = seq
+        rec = self._sign_claim(protocol.ClaimRecord(
+            work_key=work_key, node=self.local.id, epoch=self.epoch,
+            seq=seq, state=state))
+        self._store_claim(rec)
+        self._broadcast(protocol.work_claim(rec.to_dict()))
+
+    def _sign_claim(self, rec: protocol.ClaimRecord) -> protocol.ClaimRecord:
+        """Stamp our pubkey and sign the record so peers can authenticate and pin
+        it. A keyless node returns it unsigned (never authoritative to others)."""
+        if self.key is None:
+            return rec
+        rec = replace(rec, pubkey=self.key.public_b64)
+        return replace(rec, sig=self.key.sign(protocol.claim_signing_bytes(rec.to_dict())))
+
+    def _claim_authentic(self, raw: dict) -> bool:
+        """A **keyed** claim (carries a `pubkey`) MUST carry a `sig` verifying
+        against that pubkey over the claim's canonical bytes, else it is a forgery
+        or was tampered in relay and is dropped. A **keyless** claim has nothing to
+        verify: accepted, but it can never be authoritative (its claimant is never
+        trusted-personal), so it cannot suppress work — the safe degradation."""
+        pubkey = str(raw.get("pubkey", ""))
+        if not pubkey:
+            return True
+        sig = str(raw.get("sig", ""))
+        return bool(sig) and crypto.verify(
+            pubkey, protocol.claim_signing_bytes(raw), sig)
+
+    def _on_work_claim(self, msg: dict) -> None:
+        raw = msg.get("claim")
+        if not isinstance(raw, dict):
+            return
+        if not self._claim_authentic(raw):
+            return  # forged/tampered lease — drop it
+        rec = protocol.ClaimRecord.from_dict(raw)
+        if rec is None or rec.node == self.local.id:
+            # Our own claim echoed back has nothing to teach us — we are its source
+            # of truth (and re-storing it can't beat our own seq anyway).
+            return
+        # id→key pinning: a claim's embedded pubkey must match the claimant's known
+        # advertised key. A relay can't forge a lease under a known node's id with a
+        # different key (mirrors the advert id-hijack guard in _learn_node).
+        pinned = self._pinned_pubkey(rec.node)
+        if pinned and rec.pubkey and rec.pubkey != pinned:
+            return
+        if not self._store_claim(rec):
+            return  # stale (older than what we hold) or the book is capped
+        # Relay VERBATIM so the claimant's signature survives the next hop. The
+        # freshness gate in _store_claim stops the echo from looping.
+        self._broadcast(protocol.work_claim(raw))
+        self._maybe_yield(rec.work_key)
+
+    def _store_claim(self, rec: protocol.ClaimRecord) -> bool:
+        """Merge a claim into the book by per-claimant freshness. Returns True iff
+        it was adopted (new or newer). Enforces the table cap on genuinely new
+        (work_key, claimant) records only, so a fresher update to an existing claim
+        is never dropped by the cap."""
+        book = self._claims.setdefault(rec.work_key, {})
+        cur = book.get(rec.node)
+        if cur is not None and not rec.newer_than(cur):
+            return False
+        if cur is None and sum(len(b) for b in self._claims.values()) >= _MAX_CLAIMS:
+            if not book:
+                self._claims.pop(rec.work_key, None)  # don't leave an empty book
+            return False
+        book[rec.node] = rec
+        return True
+
+    def _claim_authoritative(self, node_id: str) -> bool:
+        """Whether ``node_id``'s claim counts toward ownership: self always; a peer
+        only while its link is **live** (up or stale, never down) **and** it is
+        **trusted-personal**. So a dead owner's lease lapses (self-healing) and a
+        foreign/unverified node can never suppress work by claiming it (anti-DoS)."""
+        if node_id == self.local.id:
+            return True
+        peer = self.peers.get(node_id)
+        if peer is None:
+            return False
+        stale, timeout = self.proto["peerStaleSecs"], self.proto["peerTimeoutSecs"]
+        if peer.link_state(stale, timeout) == "down":
+            return False
+        return self._peer_trust(peer) == "personal"
+
+    def _claim_holder(self, work_key: str) -> str | None:
+        """The node that currently owns ``work_key``: the lowest-id claimant among
+        all **active** claims whose claimant is [authoritative](_claim_authoritative).
+        None when the key is unclaimed. A pure function of the claim book and the
+        live set — every node computes the same owner, leaderlessly."""
+        book = self._claims.get(work_key)
+        if not book:
+            return None
+        owners = [node for node, rec in book.items()
+                  if rec.active and self._claim_authoritative(node)]
+        return min(owners) if owners else None
+
+    def _claim_owners(self) -> dict[str, str]:
+        """Every currently-owned work_key mapped to its owner id (for the snapshot).
+        Unowned keys — all claimants dead/foreign/released — are omitted."""
+        out: dict[str, str] = {}
+        for work_key in self._claims:
+            holder = self._claim_holder(work_key)
+            if holder is not None:
+                out[work_key] = holder
+        return out
+
+    def _maybe_yield(self, work_key: str) -> None:
+        """After adopting a peer's claim, stand down if it means a better (lower-id)
+        peer now owns a key we were originating: withdraw our claim and fire the
+        loss hook so the caller can abort the work it started. This is how a
+        simultaneous double-claim converges on the single lowest-id owner."""
+        own = self._own_claim(work_key)
+        if own is None or not own.active:
+            return
+        holder = self._claim_holder(work_key)
+        if holder is not None and holder != self.local.id and holder < self.local.id:
+            self._emit_claim(work_key, "released")
+            activity.log("mesh", "mesh-claim-yield",
+                         f"Mesh: yielded {work_key} to {self._node_name(holder)}")
+            if self.on_claim_lost is not None:
+                with contextlib.suppress(Exception):
+                    self.on_claim_lost(work_key)
+
+    def _forget_claims(self, node_id: str) -> None:
+        """Drop every claim a now-reaped node held, and any book left empty. Called
+        when a peer is fully removed from the table (its leases can no longer be
+        authoritative, and keeping them just wastes memory)."""
+        for book in self._claims.values():
+            book.pop(node_id, None)
+        self._claims = {k: v for k, v in self._claims.items() if v}
+
     # MARK: - assignments
 
     def _recompute(self, why: str) -> None:
@@ -1052,7 +1240,8 @@ class MeshNode:
 
     async def dispatch(self, duty_id: str, prompt: str,
                        target: str | None = None,
-                       api_key: str | None = None) -> list[dict]:
+                       api_key: str | None = None,
+                       work_key: str = "") -> list[dict]:
         """Run a SzpontRequest under a duty's placement: one spawn per slot,
         failing over within each slot's candidate list. Returns one result dict
         per slot.
@@ -1064,6 +1253,13 @@ class MeshNode:
         node and the request goes there with no failover; if that node declines
         (foreign, over quota, …) the decline is reported as-is. This is the
         "Alice may forward everything to Bob, and Bob may refuse" case.
+
+        ``work_key`` (optional) opts this request into **origination dedup**: the
+        node first [claims](claim) the key, and if a better peer already owns it
+        returns a single ``suppressed`` slot instead of double-originating. Only
+        the leaderless P2P path dedupes — a ``server`` node (runs locally) and an
+        explicit ``target`` (the client overrode placement) bypass the claim. See
+        docs/szpontnet/12-work-claims.md.
         """
         # The credential presented to an API-key-gated target: the per-request key
         # (from a control client / CLI) when given, else this node's own env key.
@@ -1082,6 +1278,17 @@ class MeshNode:
         elif target is not None:
             slots = [("target", [target])]
         else:
+            # Origination dedup: only the leaderless surplus-first path can race a
+            # peer to the same external event, so the claim gate lives here (not on
+            # the server/target paths). Suppressed → report the current owner and
+            # do not dispatch, so two nodes don't both run the same work.
+            if work_key and not self.claim(work_key):
+                holder = self._claim_holder(work_key)
+                name = self._node_name(holder) if holder else None
+                return [{"slot": "claim", "node": holder, "nodeName": name,
+                         "status": "suppressed",
+                         "reason": f"work already claimed by {name}" if name
+                         else "work already claimed"}]
             slots = assign.slot_candidates(duty_id, nodes, self.overrides,
                                            self.local.id, config.dispatch_strategy())
         used: set[str] = set()
@@ -1261,8 +1468,11 @@ class MeshNode:
             # (forwarded on the outbound dispatch); absent, the node's own env key
             # is used.
             api_key = str(msg.get("apiKey", "")) or None
+            # Optional origination-dedup key: when present the node claims it first
+            # and reports `suppressed` if a better peer already owns the work.
+            work_key = str(msg.get("workKey", ""))
             results = await self.dispatch(duty, str(msg.get("prompt", "")),
-                                          target, api_key)
+                                          target, api_key, work_key)
             return {"t": "dispatch-result", "duty": duty, "results": results}
         if t == "trust":
             fp = str(msg.get("fingerprint", "")).strip()
@@ -1346,6 +1556,10 @@ class MeshNode:
                         for fp, lbl in sorted(self._trusted.items())],
             "assignments": {k: a.to_dict() for k, a in self._assignments.items()},
             "overrides": self.overrides.to_dict(),
+            # Active origination leases this node currently observes: work_key →
+            # owning node id (the lowest-id live+personal active claimant). Lets a
+            # UI/CLI show what work is already spoken for. Only owned keys appear.
+            "claims": self._claim_owners(),
         }
 
     async def _snapshot_loop(self) -> None:

@@ -20,6 +20,7 @@ peer TCP link; **ctl** = sent on a control session (client↔node).
 | [`set-attr`](#set-attr) | link / ctl | to a node | change a node's advertised attributes |
 | [`dispatch`](#dispatch) | link / ctl | to a node | run a job here |
 | [`job-status`](#job-status) | link | reply | outcome of a dispatch (`spawned` / `declined` / `failed`) |
+| [`work-claim`](#work-claim) | link | gossip | a self-signed origination lease on a unit of work ([12](12-work-claims.md)) |
 | [`ctl`](#ctl) | ctl | client→node, first message | opens a control session |
 | [`status`](#status) | ctl | client→node | request the state snapshot |
 | [`state`](#state) | ctl | node→client | the state snapshot (reply to `status`) |
@@ -342,8 +343,11 @@ An optional `target` field (a node id) names one node to run the request on
 directly - the dispatcher's unilateral pick, with **no failover**. When `target`
 is absent the node ranks candidates itself (surplus-first). An optional `apiKey`
 field carries the credential to forward to an API-key-gated
-[server](11-trust-and-balancing.md#the-api-key) target. The peer-link shape is
-unchanged (it carries a `job`, never a `target`).
+[server](11-trust-and-balancing.md#the-api-key) target. An optional `workKey`
+field opts the request into [origination dedup](12-work-claims.md#integration-with-dispatch):
+the node claims the key first and, if a better peer already owns the work, replies
+with a single `"suppressed"` slot instead of dispatching. The peer-link shape is
+unchanged (it carries a `job`, never a `target`/`workKey`).
 
 > The two shapes exist because a peer link dispatches *one job to this node*, while
 > a control client asks *this node to place a job across the mesh on its behalf*.
@@ -380,6 +384,38 @@ that learns a live job id cannot resolve someone else's dispatch).
 > "this candidate didn't take it - fail over to the next." The sole exception is an
 > explicit [`target`](#dispatch): that outcome is reported as-is, with no failover.
 > Additional statuses are a reserved extension ([09](09-extensibility.md)).
+
+### `work-claim`
+
+A gossiped, self-signed **origination lease** on a unit of work: how nodes that
+independently observe the same external event agree that only one of them
+originates it. Full semantics in [12-work-claims](12-work-claims.md).
+
+```json
+{"t": "work-claim", "claim": {
+   "workKey": "review:github.com/acme/app#123@abc123",
+   "node": "3236…", "pubkey": "kQ0f…=",
+   "epoch": 1784057237.23, "seq": 0, "state": "active", "sig": "…base64…"}, "v": 1}
+```
+
+| `claim` field | Type | Req? | Meaning |
+|-------|------|------|---------|
+| `workKey` | string | **yes** | the unit of work; a claim without a non-empty `workKey` MUST be dropped. |
+| `node` | string | **yes** | the claimant node id; a claim without a non-empty `node` MUST be dropped. |
+| `pubkey` | string | no | the claimant's advertised base64 Ed25519 key, carried inline so the claim self-authenticates. Omitted by a keyless claimant. |
+| `epoch` | float | no (`0`) | the claimant's incarnation (its node `epoch`), so a restart supersedes its prior leases. |
+| `seq` | int | no (`0`) | the claimant's per-`workKey` counter; the freshest same-claimant record wins. |
+| `state` | string | no (`"active"`) | `"active"` (holding the work) or `"released"` (given up). An unknown value MUST be treated as **not active**. |
+| `sig` | string | no | base64 Ed25519 signature by the claimant over `"szpontnet-workclaim-v1:" ‖ canonical(claim)`. A **keyed** claim MUST carry a valid `sig` or be dropped; a keyless claim carries none. |
+
+A receiver **authenticates** the claim (drop a keyed claim with an absent/invalid
+`sig`, or one whose `pubkey` disagrees with the claimant's pinned key), merges it
+into its claim book by `(epoch, seq)` freshness per `(workKey, node)`, re-propagates
+an adopted claim **verbatim** (so the signature survives the hop), and recomputes the
+key's owner. The **owner** is the lowest-id **active** claimant that is **live** and
+**`personal`** - a keyless, foreign, or `down` claimant never owns. See
+[12-work-claims](12-work-claims.md). A node that does not implement work-claims
+simply drops this message and keeps the link ([09 rule 2](09-extensibility.md#the-compatibility-contract)).
 
 ---
 
@@ -511,10 +547,12 @@ routing the job through the mesh.
 
 Each entry reports one [slot](07-dispatch.md#slots): which slot it was — a
 `platform` for a spread duty, `"any"` for a no-spread duty, `"target"` for an
-explicit [target](#dispatch), or `"server"` for a
+explicit [target](#dispatch), `"server"` for a
 [server node](11-trust-and-balancing.md#the-server-role) running the request
-locally — which node took it (`node`/`nodeName`, `null` if none did), and the
-`status`/`reason`. See [07-dispatch](07-dispatch.md).
+locally, or `"claim"` for a request [suppressed](12-work-claims.md#integration-with-dispatch)
+because a peer already owns its `workKey` (status `"suppressed"`, with the owner in
+`node`/`nodeName`) — which node took it (`node`/`nodeName`, `null` if none did), and
+the `status`/`reason`. See [07-dispatch](07-dispatch.md).
 
 ---
 

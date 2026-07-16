@@ -92,11 +92,13 @@ gossip). See
 **Authenticated-gossip construction.** A gossiped advertisement / override carries a
 `sig` field: an Ed25519 signature over `<tag> || canonical(payload)`, where
 `canonical(x)` = JSON of `x` **with its `sig` removed, keys sorted, compact
-separators** (`,`/`:`), and the tags are `szpontnet-nodeinfo-v1:` (advertisements)
-and `szpontnet-overrides-v1:` (overrides). An advertisement is signed by its own
-device key and verified against its own `pubkey`; an override is signed by its
-`updatedBy` node and verified against that node's pinned key. `sig` is omitted when
-empty (keyless). See [11 - authenticated gossip](11-trust-and-balancing.md#authenticated-gossip).
+separators** (`,`/`:`), and the tags are `szpontnet-nodeinfo-v1:` (advertisements),
+`szpontnet-overrides-v1:` (overrides), and `szpontnet-workclaim-v1:`
+([work-claims](12-work-claims.md#authentication)). An advertisement is signed by its
+own device key and verified against its own `pubkey`; an override is signed by its
+`updatedBy` node and verified against that node's pinned key; a work-claim is signed
+by its `node` claimant and verified against the `pubkey` carried inline. `sig` is
+omitted when empty (keyless). See [11 - authenticated gossip](11-trust-and-balancing.md#authenticated-gossip).
 
 ## Server & API key (v1 vocabulary)
 
@@ -153,11 +155,25 @@ in [06-coordination](06-coordination.md#ranking).
 | `conflicts` | `{strategy: weakest-first, tokenAware: true, spread: []}` |
 | `audit` | `{strategy: weakest-first, tokenAware: true, spread: [{linux,1},{macos,1}]}` |
 
+## Work claims (v0.2.0 vocabulary)
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| claim signing tag | `szpontnet-workclaim-v1:` | domain tag for a claim `sig` ([12](12-work-claims.md#authentication)). |
+| claim `state` | `active` \| `released` | active = holding the work; any unknown value counts as **not** active. |
+| owner rule | lowest node id | among **active**, **live**, **`personal`** claimants of a `workKey` ([12](12-work-claims.md#ownership)). |
+| lease scope | claimant liveness | authoritative only while the claimant is `up`/`stale`; freed on `down`. |
+| claim-book cap | `4096` (reference) | max stored `(workKey, claimant)` records; bounds a spoofed-`workKey` flood. |
+| suppressed slot | `"claim"` / `"suppressed"` | the `dispatch-result` slot returned when a peer already owns the `workKey`. |
+
+Work-claims are an **optional role** ([12 conformance](12-work-claims.md#conformance));
+a node that omits them drops the `work-claim` message and keeps the link.
+
 ## Message types
 
 `beacon`, `hello`, `auth`, `node`, `overrides`, `heartbeat`, `set-attr`,
-`dispatch`, `job-status`, `ctl`, `status`, `state`, `set-overrides`, `trust`,
-`untrust`, `stop`, `ok`, `error`, `dispatch-result`. Full reference:
+`dispatch`, `job-status`, `work-claim`, `ctl`, `status`, `state`, `set-overrides`,
+`trust`, `untrust`, `stop`, `ok`, `error`, `dispatch-result`. Full reference:
 [04-messages](04-messages.md).
 
 ## Job statuses
