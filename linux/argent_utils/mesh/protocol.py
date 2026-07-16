@@ -44,7 +44,14 @@ class NodeInfo:
     name: str
     platform: str  # "linux" | "macos" | ...
     tier: int
-    tokens: str  # "ok" | "low" | "out"
+    tokens: str  # the EFFECTIVE token state: "ok" | "low" | "out"
+    # Display hints (additive): whether tier was auto-detected from hardware, and
+    # whether the token state is auto-derived from real usage (vs a manual pin).
+    strength_auto: bool = True
+    tokens_auto: bool = True
+    # Fraction of the heuristic token budget still remaining (1.0 = fresh, 0.0 =
+    # out), so the console shows a live "quota NN%" for every node, not just self.
+    tokens_pct: float = 1.0
     tcp_port: int = 0
     epoch: float = 0.0  # process start time — a restart bumps it (new incarnation)
     seq: int = 0  # per-node update counter; receivers keep the highest
@@ -69,6 +76,9 @@ class NodeInfo:
             "platform": self.platform,
             "tier": self.tier,
             "tokens": self.tokens,
+            "strengthAuto": self.strength_auto,
+            "tokensAuto": self.tokens_auto,
+            "tokensPct": round(self.tokens_pct, 3),
             "tcpPort": self.tcp_port,
             "epoch": self.epoch,
             "seq": self.seq,
@@ -93,6 +103,9 @@ class NodeInfo:
                 platform=str(d.get("platform", "unknown")),
                 tier=int(d.get("tier", 3)),
                 tokens=str(d.get("tokens", "ok")),
+                strength_auto=bool(d.get("strengthAuto", True)),
+                tokens_auto=bool(d.get("tokensAuto", True)),
+                tokens_pct=float(d.get("tokensPct", 1.0)),
                 tcp_port=int(d.get("tcpPort", 0)),
                 epoch=float(d.get("epoch", 0.0)),
                 seq=int(d.get("seq", 0)),

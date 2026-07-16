@@ -123,6 +123,38 @@ def tier_bounds() -> tuple[int, int, int]:
     return t["min"], t["max"], t["default"]
 
 
+def tier_label(tier: int) -> str:
+    """Human word for a strength tier ('Very strong' … 'Very light'), from the
+    shared model's ``tiers.labels``; falls back to ``tier N`` if unlabelled."""
+    labels = core.mesh()["tiers"].get("labels", {})
+    return labels.get(str(tier), f"tier {tier}")
+
+
+def tokens_per_weight() -> float:
+    """Heuristic per-window token ceiling for a weight-1 (Pro) plan. Scaled by a
+    plan's weight to get its ceiling (see usage.py)."""
+    try:
+        return float(accounts().get("tokensPerWeight", 2_000_000))
+    except (TypeError, ValueError):
+        return 2_000_000.0
+
+
+def usage_window_hours() -> float:
+    """Trailing window over which local token consumption is measured."""
+    try:
+        return float(accounts().get("usageWindowHours", 5.0)) or 5.0
+    except (TypeError, ValueError):
+        return 5.0
+
+
+def low_threshold() -> float:
+    """Remaining-fraction boundary below which the token state drops to 'low'."""
+    try:
+        return float(accounts().get("lowThreshold", 0.34))
+    except (TypeError, ValueError):
+        return 0.34
+
+
 # MARK: - Placement (per-duty policy) + LWW overrides
 
 

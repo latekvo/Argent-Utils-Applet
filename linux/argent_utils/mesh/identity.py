@@ -16,9 +16,12 @@ import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from . import config
+from . import config, hardware
 
-TOKEN_STATES = ("ok", "low", "out")
+# The manual token-override values. "auto" (the default) means "derive my ok/low/out
+# state from real local usage" (see usage.py); the other three pin it, as a
+# "pause this node" / force-available escape.
+TOKEN_STATES = ("auto", "ok", "low", "out")
 
 
 def mesh_dir() -> Path:
@@ -55,8 +58,12 @@ class LocalNode:
     id: str
     name: str
     tier: int
-    tokens: str  # "ok" | "low" | "out"
+    tokens: str  # manual token override: "auto" | "ok" | "low" | "out"
     duties_enabled: dict  # duty id -> bool (absent = enabled)
+    # Whether ``tier`` was auto-detected from hardware (True) or pinned by an
+    # explicit edit (False). A manual tier edit flips this off so detection stops
+    # overriding the operator's choice.
+    strength_auto: bool = True
 
     def to_dict(self) -> dict:
         return {
@@ -64,6 +71,7 @@ class LocalNode:
             "name": self.name,
             "tier": self.tier,
             "tokens": self.tokens,
+            "strengthAuto": self.strength_auto,
             "dutiesEnabled": self.duties_enabled,
         }
 
@@ -81,21 +89,37 @@ def _clamped_tier(raw: object) -> int:
 
 def load() -> LocalNode:
     """Load (or mint) this machine's identity. Malformed fields fall back to
-    defaults; a missing file is first-run and gets persisted immediately."""
+    defaults; a missing file is first-run and gets persisted immediately.
+
+    Strength auto-detection: a fresh node (or one that never pinned its tier) has
+    ``strengthAuto`` on, so its tier is (re)computed from the machine's specs on
+    every load and persisted. An explicit ``tier`` in the file with no
+    ``strengthAuto`` flag is treated as a pin (back-compat: that's how a
+    hand-written node.json expresses a chosen tier)."""
     _, _, default_tier = config.tier_bounds()
     raw: dict = {}
     try:
         raw = json.loads(node_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         pass
+
+    # Default: auto unless the file explicitly pins a tier (older files) or says so.
+    if "strengthAuto" in raw:
+        auto = bool(raw.get("strengthAuto"))
+    else:
+        auto = "tier" not in raw
+    tier = hardware.detect_tier() if auto else _clamped_tier(raw.get("tier", default_tier))
+
     node = LocalNode(
         id=str(raw.get("id") or uuid.uuid4().hex),
         name=str(raw.get("name") or default_name()),
-        tier=_clamped_tier(raw.get("tier", default_tier)),
-        tokens=raw.get("tokens") if raw.get("tokens") in TOKEN_STATES else "ok",
+        tier=tier,
+        tokens=raw.get("tokens") if raw.get("tokens") in TOKEN_STATES else "auto",
         duties_enabled=dict(raw.get("dutiesEnabled", {})),
+        strength_auto=auto,
     )
-    if raw.get("id") != node.id:  # first run (or a corrupt file): persist the minted id
+    # First run, a corrupt file, or a refreshed auto tier: persist the current view.
+    if raw.get("id") != node.id or node.to_dict() != raw:
         save(node)
     return node
 
@@ -119,7 +143,14 @@ def apply_attrs(node: LocalNode, attrs: dict) -> LocalNode:
     if isinstance(attrs.get("name"), str) and attrs["name"].strip():
         out = replace(out, name=attrs["name"].strip()[:64])
     if "tier" in attrs:
-        out = replace(out, tier=_clamped_tier(attrs["tier"]))
+        # An explicit tier edit pins the value: turn auto-detection off so it
+        # doesn't get clobbered on the next load.
+        out = replace(out, tier=_clamped_tier(attrs["tier"]), strength_auto=False)
+    if "strengthAuto" in attrs:
+        auto = bool(attrs["strengthAuto"])
+        # Re-enabling auto immediately re-detects, so the panel shows the effect.
+        out = replace(out, strength_auto=auto,
+                      tier=hardware.detect_tier() if auto else out.tier)
     if attrs.get("tokens") in TOKEN_STATES:
         out = replace(out, tokens=attrs["tokens"])
     if isinstance(attrs.get("dutiesEnabled"), dict):

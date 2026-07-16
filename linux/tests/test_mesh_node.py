@@ -203,6 +203,20 @@ def test_mesh_discovery_assignment_failover_and_dispatch(fleet):
         _wait_for(lambda nid=nid: _links_up(fleet.state(nid), 2),
                   what=f"{nid} to link 2 peers")
 
+    # 1b. The console fields land in the snapshot: self runs with a real uptime,
+    #     a pinned strength (explicit tier), an auto quota %, and a `linking`
+    #     count; each up peer carries a real connection uptime (the "up 0s" fix).
+    st = fleet.state("aaaa")
+    me = st["self"]
+    assert isinstance(me.get("uptimeSecs"), (int, float)) and me["uptimeSecs"] >= 0
+    assert me.get("strengthAuto") is False  # explicit tier pins strength
+    assert 0.0 <= me.get("tokensPct", -1) <= 1.0
+    assert isinstance(st.get("linking"), int)
+    for peer in st["peers"]:
+        if peer.get("link") in ("up", "stale"):
+            assert isinstance(peer.get("uptimeSecs"), (int, float))
+            assert peer["uptimeSecs"] >= 0
+
     # 2. Deterministic agreement: all three nodes publish identical assignments.
     def agreed():
         views = [_assignments(fleet.state(n)) for n in ("aaaa", "bbbb", "cccc")]
@@ -482,3 +496,32 @@ def test_node_restart_is_a_new_incarnation(fleet):
         and _assignments(fleet.state("aaaa")),
         what="post-restart assignment agreement",
     )
+
+
+def test_auto_token_state_reflects_real_usage(fleet):
+    """A node with tokens='auto' derives ok/low/out from its OWN ~/.claude usage
+    (the node's HOME is its fleet dir), with no peers and no manual dropdown."""
+    from datetime import datetime, timezone
+    # Seed the node's HOME/.claude with usage far over the max-5x ceiling BEFORE it
+    # starts, so its first snapshot already reads 'out'.
+    d = fleet.root / "solo0"
+    proj = d / ".claude" / "projects" / "demo"
+    proj.mkdir(parents=True, exist_ok=True)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    (proj / "s.jsonl").write_text(json.dumps({
+        "timestamp": now_iso,
+        "message": {"usage": {"input_tokens": 20_000_000, "output_tokens": 0,
+                              "cache_creation_input_tokens": 0}},
+    }) + "\n")
+
+    fleet.start("solo0", "solo", "linux", tier=3, tokens="auto")
+
+    def _self_when_out():
+        me = fleet.state("solo0").get("self", {})
+        return me if me.get("tokens") == "out" else None
+
+    me = _wait_for(_self_when_out,
+                   what="auto token state to read 'out' from real usage")
+    assert me["tokensAuto"] is True        # derived, not pinned
+    assert me["tokens"] == "out"           # 20M > 10M ceiling
+    assert me["tokensPct"] == 0.0

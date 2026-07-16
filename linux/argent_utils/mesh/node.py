@@ -34,7 +34,8 @@ import uuid
 
 from .. import activity
 from . import (
-    assign, config, crypto, identity, protocol, spawnjob, statefile, stats, trust,
+    assign, config, crypto, identity, protocol, spawnjob, statefile, stats,
+    trust, usage,
 )
 from .config import PlacementOverrides
 from .protocol import Job, NodeInfo
@@ -80,6 +81,11 @@ class Peer:
         self.last_seen = time.monotonic()
         self.writer: asyncio.StreamWriter | None = None
         self.down_since: float | None = None
+        # When the CURRENT link came up (monotonic), for the uptime badge. Set when
+        # a link is established, cleared when it drops; survives up↔stale flapping
+        # (stale is just heartbeat-age — the socket is still open) so uptime counts
+        # continuous connection, not "seconds since the last packet".
+        self.linked_since: float | None = None
         # Fingerprint of the key this peer PROVED it holds on the link (signed our
         # challenge). None until verified. Trust keys on this, never on info.pubkey
         # alone - a peer can advertise any pubkey but only sign for its own.
@@ -107,6 +113,10 @@ class MeshNode:
         self._trusted = trust.load()  # local allowlist of trusted fingerprints
         self.platform = identity.detect_platform()
         self.epoch = time.time()
+        # Cached automatic token-budget read (refreshed on the snapshot tick, so the
+        # hot `info` path never touches the filesystem). See _refresh_tokens.
+        self._token_state = "ok"
+        self._token_frac = 1.0
         self.tcp_port = 0  # bound in start()
         self.peers: dict[str, Peer] = {}
         self.overrides = PlacementOverrides()
@@ -142,7 +152,10 @@ class MeshNode:
             name=self.local.name,
             platform=self.platform,
             tier=self.local.tier,
-            tokens=self.local.tokens,
+            tokens=self.current_tokens(),
+            strength_auto=self.local.strength_auto,
+            tokens_auto=(self.local.tokens == "auto"),
+            tokens_pct=self._token_frac,
             tcp_port=self.tcp_port,
             epoch=self.epoch,
             seq=self._seq,
@@ -151,6 +164,26 @@ class MeshNode:
             pubkey=self.key.public_b64 if self.key else "",
             stats=self.stats.advertise(),
         )
+
+    # MARK: - automatic token budget
+
+    def current_tokens(self) -> str:
+        """This node's EFFECTIVE token state: the manual override when pinned, else
+        the state auto-derived from real local usage (cached in ``_token_state``)."""
+        override = self.local.tokens
+        return override if override in ("ok", "low", "out") else self._token_state
+
+    def _refresh_tokens(self) -> bool:
+        """Re-read real local usage and recompute the auto token state + remaining
+        fraction. Returns True when the EFFECTIVE state changed (so the caller can
+        re-gossip). Cheap: usage.window_tokens only opens files touched in-window."""
+        before = self.current_tokens()
+        try:
+            state, frac = usage.token_state(self.stats.plan)
+        except Exception:  # noqa: BLE001 — a broken log must never take the node down
+            state, frac = self._token_state, self._token_frac
+        self._token_state, self._token_frac = state, frac
+        return self.current_tokens() != before
 
     @property
     def fingerprint(self) -> str:
@@ -186,6 +219,7 @@ class MeshNode:
             loop.create_task(self._heartbeat_loop(), name="mesh-heartbeat"),
             loop.create_task(self._snapshot_loop(), name="mesh-snapshot"),
         ]
+        self._refresh_tokens()  # seed the auto token state before the first advert
         self._recompute("start")
         activity.log("mesh", "mesh-up",
                      f"Mesh node up: {self.local.name} ({self.platform}) :{self.tcp_port}")
@@ -566,6 +600,8 @@ class MeshNode:
                 # keep the new one, close the old quietly.
                 with contextlib.suppress(Exception):
                     peer.writer.close()
+            if peer.linked_since is None:
+                peer.linked_since = time.monotonic()  # link came up: start the uptime clock
             peer.writer = link_writer
             self._bump_and_gossip()  # our `sees` changed
         if fresh:
@@ -596,6 +632,7 @@ class MeshNode:
             with contextlib.suppress(Exception):
                 peer.writer.close()
             peer.writer = None
+        peer.linked_since = None  # link gone: uptime resets for the next connection
 
     # MARK: - heartbeats + liveness
 
@@ -786,7 +823,7 @@ class MeshNode:
             return False, "foreign device (zero-trust path not implemented)"
         if not self.local.duty_enabled(job.duty):
             return False, f"duty {job.duty} disabled here"
-        if self.local.tokens == "out":
+        if self.current_tokens() == "out":
             return False, "out of tokens"
         return True, ""
 
@@ -919,13 +956,21 @@ class MeshNode:
             d["fingerprint"] = p.verified_fp or crypto.fingerprint_of(p.info.pubkey)
             d["trust"] = self._peer_trust(p)
             d["surplus"] = round(p.info.surplus(), 3)
+            # Real connection uptime for the badge (seconds since the link came up);
+            # None while down, so the UI shows "last seen" instead.
+            d["uptimeSecs"] = (round(now - p.linked_since, 1)
+                               if p.linked and p.linked_since is not None else None)
             peers.append(d)
         me = self.info.to_dict()
         me["fingerprint"] = self.fingerprint
+        me["uptimeSecs"] = round(time.time() - self.epoch, 1)  # how long this node has run
         return {
             "tcpPort": self.tcp_port,
             "self": me,
             "peers": peers,
+            # How many peers are mid-handshake right now — drives the "scanning the
+            # LAN" affordance so a slow first link isn't a silent 20s of nothing.
+            "linking": len(self._dialing),
             "trusted": [{"fingerprint": fp, "label": lbl}
                         for fp, lbl in sorted(self._trusted.items())],
             "assignments": {k: a.to_dict() for k, a in self._assignments.items()},
@@ -937,5 +982,10 @@ class MeshNode:
             # Age the local accounting so the displayed usageAvg/quota decay even
             # while idle (local only — no gossip churn; peers hear on real change).
             self.stats = self.stats.decayed(time.time())
+            # Re-read real usage; if the auto token state flipped (e.g. we crossed
+            # into 'low'), tell peers so their load balancing routes accordingly.
+            if self._refresh_tokens():
+                self._bump_and_gossip()
+                self._recompute("token state")
             statefile.write_state(self.snapshot())
             await asyncio.sleep(self.proto["stateWriteIntervalSecs"])

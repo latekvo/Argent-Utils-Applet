@@ -75,6 +75,8 @@ def _print_status() -> int:
             return 1
         running = statefile.node_running(state)
         print(f"node not answering; last snapshot ({'live pid' if running else 'DEAD'}):")
+    from . import config
+
     def _acct(info: dict) -> str:
         st = info.get("stats") or {}
         if not st:
@@ -82,15 +84,24 @@ def _print_status() -> int:
         surplus = round(float(st.get("quotaLeft", 0)) - float(st.get("usageAvg", 0)), 2)
         return f"  {st.get('plan', '?')}  surplus {surplus}"
 
+    def _strength(info: dict) -> str:
+        label = config.tier_label(int(info.get("tier", 3)))
+        return f"{label}{'(auto)' if info.get('strengthAuto') else ''}"
+
+    def _tokens(info: dict) -> str:
+        pct = round(float(info.get("tokensPct", 1.0)) * 100)
+        auto = "auto" if info.get("tokensAuto") else "pinned"
+        return f"{info.get('tokens')} {pct}% ({auto})"
+
     me = state.get("self", {})
-    print(f"self  {me.get('name')}  {me.get('platform')}  tier {me.get('tier')}"
-          f"  tokens {me.get('tokens')}{_acct(me)}"
+    print(f"self  {me.get('name')}  {me.get('platform')}  {_strength(me)}"
+          f"  tokens {_tokens(me)}{_acct(me)}"
           f"  :{state.get('tcpPort')}  id {me.get('id','')[:8]}"
           f"  fp {me.get('fingerprint','')[:16] or '(keyless)'}")
     for p in state.get("peers", []):
         vmark = "✓" if p.get("verified") else "?"
-        print(f"peer  {p.get('name')}  {p.get('platform')}  tier {p.get('tier')}"
-              f"  tokens {p.get('tokens')}{_acct(p)}  {p.get('trust', 'personal')}{vmark}"
+        print(f"peer  {p.get('name')}  {p.get('platform')}  {_strength(p)}"
+              f"  tokens {_tokens(p)}{_acct(p)}  {p.get('trust', 'personal')}{vmark}"
               f"  link {p.get('link')}  {p.get('addr')}  fp {p.get('fingerprint','')[:16]}")
     trusted = state.get("trusted", [])
     if trusted:
@@ -139,7 +150,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--status", action="store_true", help="print the live topology")
     ap.add_argument("--stop", action="store_true", help="stop the running node")
     ap.add_argument("--set", nargs="+", metavar="K=V", dest="set_attrs",
-                    help="edit node attrs: tier=N tokens=ok|low|out name=X duty.<id>=on|off")
+                    help="edit node attrs: tier=N tokens=auto|ok|low|out name=X "
+                         "duty.<id>=on|off (tokens=auto tracks real usage; a tier "
+                         "edit pins strength)")
     ap.add_argument("--node", default="self", metavar="ID",
                     help="target node id for --set (default: this machine)")
     ap.add_argument("--dispatch", metavar="DUTY", help="route a request through the mesh")

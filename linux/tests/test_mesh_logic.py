@@ -211,14 +211,20 @@ def test_identity_minted_and_persisted(tmp_path, monkeypatch):
 
 def test_apply_attrs_clamps_and_ignores_junk(tmp_path, monkeypatch):
     monkeypatch.setenv("ARGENT_MESH_DIR", str(tmp_path))
+    monkeypatch.setenv("ARGENT_MESH_TIER", "3")  # deterministic auto-detect
     n = identity.load()
     lo, hi, _ = config.tier_bounds()
+    assert n.tokens == "auto" and n.strength_auto  # fresh node: auto everything
     n = identity.apply_attrs(n, {"tier": 99, "tokens": "banana", "name": "  "})
-    assert n.tier == hi and n.tokens == "ok"
+    # invalid tokens ignored (stays auto); a tier edit clamps AND pins strength.
+    assert n.tier == hi and n.tokens == "auto" and not n.strength_auto
     n = identity.apply_attrs(n, {"tier": -3, "tokens": "out", "name": "box",
                                  "dutiesEnabled": {"audit": False}, "junk": 1})
     assert n.tier == lo and n.tokens == "out" and n.name == "box"
     assert not n.duty_enabled("audit") and n.duty_enabled("review")
+    # re-enabling auto re-detects the tier from hardware (the forced value here).
+    n = identity.apply_attrs(n, {"strengthAuto": True})
+    assert n.strength_auto and n.tier == 3
 
 
 # MARK: trust - device keys + the local allowlist
@@ -394,6 +400,101 @@ def test_surplus_first_neutral_stats_fall_back_to_weakest_first():
     lo = NodeInfo(id="lo", name="lo", platform="linux", tier=4, tokens="ok")
     slots = assign.slot_candidates("review", [hi, lo], strategy="surplus-first")
     assert slots == [("any", ["lo", "hi"])]
+
+
+# MARK: machine-strength auto-detection (hardware.py)
+
+
+def test_strength_score_ranks_stronger_boxes_higher():
+    from argent_utils.mesh import hardware
+    weak = hardware.strength_score(ram_gb=8, cores=4, dgpu=False)
+    strong = hardware.strength_score(ram_gb=64, cores=16, dgpu=True)
+    assert strong > weak
+    # A maxed box scores at the top of the 0..6 range; a tiny one at the bottom.
+    assert hardware.strength_score(128, 32, True) == 6
+    assert hardware.strength_score(4, 2, False) == 0
+
+
+def test_strength_score_maps_to_tier_bounds_inverted():
+    from argent_utils.mesh import hardware
+    lo, hi, _ = config.tier_bounds()
+    # 1 = strongest, so the strongest box lands on `lo` and the weakest on `hi`.
+    assert hardware._score_to_tier(6, lo, hi) == lo
+    assert hardware._score_to_tier(0, lo, hi) == hi
+
+
+def test_detect_tier_honours_env_override(monkeypatch):
+    from argent_utils.mesh import hardware
+    monkeypatch.setenv("ARGENT_MESH_TIER", "2")
+    assert hardware.detect_tier() == 2
+    monkeypatch.setenv("ARGENT_MESH_TIER", "999")  # clamped to bounds
+    _, hi, _ = config.tier_bounds()
+    assert hardware.detect_tier() == hi
+
+
+# MARK: automatic token budget from real usage (usage.py)
+
+
+def _write_usage(dir_path, entries):
+    """Write one Claude-style transcript file; entries = [(iso_ts, in, out, cache)]."""
+    import json as _json
+    proj = dir_path / ".claude" / "projects" / "demo"
+    proj.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for ts, i, o, c in entries:
+        lines.append(_json.dumps({
+            "timestamp": ts,
+            "message": {"usage": {"input_tokens": i, "output_tokens": o,
+                                  "cache_creation_input_tokens": c,
+                                  "cache_read_input_tokens": 9_999_999}},
+        }))
+    (proj / "session.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_window_tokens_sums_recent_and_excludes_cache_reads(tmp_path, monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    from argent_utils.mesh import usage
+    monkeypatch.setenv("HOME", str(tmp_path))
+    now = datetime.now(timezone.utc)
+    recent = (now - timedelta(hours=1)).isoformat()
+    old = (now - timedelta(hours=9)).isoformat()  # outside a 5h window
+    _write_usage(tmp_path, [(recent, 100, 50, 25), (old, 1000, 1000, 1000)])
+    got = usage.window_tokens(now.timestamp(), window_hours=5.0)
+    # only the recent turn, and cache_read (9.9M) is NOT counted.
+    assert got == 175.0
+
+
+def test_token_state_thresholds(monkeypatch):
+    from argent_utils.mesh import usage
+    # Ceiling for pro = weight(1) * tokensPerWeight.
+    ceiling = usage.token_ceiling("pro")
+    assert ceiling == config.tokens_per_weight()
+    assert usage.state_from_fraction(1.0) == "ok"
+    assert usage.state_from_fraction(0.0) == "out"
+    assert usage.state_from_fraction(config.low_threshold() / 2) == "low"
+
+
+# MARK: identity — auto-detect + manual pin + token override
+
+
+def test_identity_auto_detects_strength_on_first_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("ARGENT_MESH_DIR", str(tmp_path))
+    monkeypatch.setenv("ARGENT_MESH_TIER", "2")
+    n = identity.load()
+    assert n.strength_auto and n.tier == 2 and n.tokens == "auto"
+    # Persisted with the auto flag; a reload with a different detected tier follows it.
+    monkeypatch.setenv("ARGENT_MESH_TIER", "4")
+    assert identity.load().tier == 4
+
+
+def test_identity_explicit_tier_in_file_is_a_pin(tmp_path, monkeypatch):
+    import json as _json
+    monkeypatch.setenv("ARGENT_MESH_DIR", str(tmp_path))
+    monkeypatch.setenv("ARGENT_MESH_TIER", "1")  # would auto-detect strong…
+    (tmp_path / "node.json").write_text(_json.dumps(
+        {"id": "abc123", "name": "box", "tier": 5}))  # …but the file pins weak
+    n = identity.load()
+    assert n.tier == 5 and not n.strength_auto  # explicit tier wins, auto off
 
 
 if __name__ == "__main__":  # dependency-free smoke run
