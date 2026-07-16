@@ -1651,13 +1651,19 @@ class MeshNode:
         hanging. Runs as a background task per confined job."""
         poll = max(0.1, float(self.proto["heartbeatIntervalSecs"]))
         deadline = time.monotonic() + float(self.proto["foreignJobTimeoutSecs"])
+        last_size = -1
         while time.monotonic() < deadline:
             with contextlib.suppress(OSError):
-                if result_path.exists() and result_path.stat().st_size > 0:
+                size = result_path.stat().st_size if result_path.exists() else 0
+                if size > 0 and size == last_size:
+                    # Non-empty and unchanged since the previous poll → fully written
+                    # (guards against reading a still-growing file; a runner SHOULD
+                    # also write atomically via a temp file + rename).
                     output = await asyncio.to_thread(self._read_result_file, result_path)
                     self._emit_result(job.id, requester_id, {
                         "ok": True, "duty": job.duty, "output": output, "error": ""})
                     return
+                last_size = size
             await asyncio.sleep(poll)
         activity.log("mesh", "mesh-dispatch-failed",
                      f"Mesh: confined {job.duty} timed out, returning failure")
@@ -1681,10 +1687,29 @@ class MeshNode:
         payload = {"id": job_id, "node": self.local.id, "result": result_payload}
         return self.key.sign(protocol.result_signing_bytes(payload))
 
+    def _fit_result(self, job_id: str, result_payload: dict) -> dict:
+        """Shrink an over-large artifact so the whole `job-result` line stays under
+        the wire cap ([MAX_LINE_BYTES]) *after* JSON escaping — a receiver drops an
+        over-length line, so an un-fitted result would never arrive. The output is
+        halved until the encoded (sig-less) message fits, with headroom for the
+        signature and envelope; truncation is flagged in `error`."""
+        budget = protocol.MAX_LINE_BYTES - 512  # headroom for the sig + envelope
+        output = str(result_payload.get("output", ""))
+        truncated = False
+        while output and len(protocol.encode(protocol.job_result(
+                job_id, self.local.id, {**result_payload, "output": output}))) > budget:
+            output = output[: len(output) // 2]
+            truncated = True
+        if not truncated:
+            return result_payload
+        return {**result_payload, "output": output,
+                "error": result_payload.get("error") or "result truncated to fit the wire limit"}
+
     def _emit_result(self, job_id: str, to_node: str, result_payload: dict) -> None:
         """Build + sign the job-result and register it for reliable delivery to
         ``to_node``, sending the first copy now. Retried on the heartbeat tick until
         acked or its deadline (docs/szpontnet/13)."""
+        result_payload = self._fit_result(job_id, result_payload)
         sig = self._sign_result(job_id, result_payload)
         msg = protocol.job_result(job_id, self.local.id, result_payload, sig)
         now = time.monotonic()

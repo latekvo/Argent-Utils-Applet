@@ -53,8 +53,9 @@ _CONFINED_PREAMBLE = (
     "identity — you hold none of its credentials and the host will reject such "
     "attempts. Confined side effects on this machine's own resources (running code, "
     "launching an emulator/simulator, building) are allowed. Produce your result "
-    "and write it to the file named by $ARGENT_MESH_RESULT_FILE; the node returns it "
-    "to the requester, who performs any social action themselves.\n\n"
+    "and write it to the file named by $ARGENT_MESH_RESULT_FILE (write it in one shot "
+    "— ideally a temp file then rename — so the node reads a complete result); the "
+    "node returns it to the requester, who performs any social action themselves.\n\n"
 )
 
 

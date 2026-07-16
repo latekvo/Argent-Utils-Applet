@@ -1262,6 +1262,25 @@ def test_foreign_result_dropped_from_wrong_link_or_when_forged(tmp_path, monkeyp
     assert not bw.of("job-ack") and not acted
 
 
+def test_oversized_result_is_truncated_to_fit_the_wire(tmp_path, monkeypatch):
+    """A confined artifact larger than the wire line limit is truncated (not dropped
+    by the receiver): the emitted job-result stays under MAX_LINE_BYTES, the executor
+    still signs the truncated payload validly, and the truncation is flagged."""
+    if not crypto.AVAILABLE:
+        return
+    node = _fresh_node(tmp_path, monkeypatch)
+    _peer, w = _link_peer(node, "alice", _mk_key())
+    huge = {"ok": True, "duty": "review", "output": "X" * (2 * protocol.MAX_LINE_BYTES),
+            "error": ""}
+    node._emit_result("j1", "alice", huge)
+    sent = w.of("job-result")[-1]
+    assert len(protocol.encode(sent)) <= protocol.MAX_LINE_BYTES
+    assert "truncated" in sent["result"]["error"]
+    # The executor (this node) signed the truncated payload it actually carries.
+    assert crypto.verify(node.key.public_b64, protocol.result_signing_bytes(
+        {"id": "j1", "node": node.local.id, "result": sent["result"]}), sent["sig"])
+
+
 def test_confined_env_is_scrubbed_of_host_credentials(monkeypatch):
     """The confined child must never inherit the host's credentials — that is what
     programmatically prevents a foreign agent from acting as us (using `gh`, cloud
