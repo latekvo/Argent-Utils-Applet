@@ -509,8 +509,11 @@ class MeshView(QWidget):
 
         # When no device is trusted yet, every peer is Personal by default — say so,
         # so the trust toggles don't look inert (marking one Personal seeds the list).
+        # Unless someone is banned: a ban overrides the Personal default, so the
+        # blanket "every peer is Personal" would be wrong for that peer.
         trusted = (self.store.mesh_state or {}).get("trusted") or []
-        if peers and not trusted:
+        anyone_banned = any(p.get("trust") == "banned" for p in peers)
+        if peers and not trusted and not anyone_banned:
             hint = QLabel("No trust allowlist yet — every peer is treated as Personal. "
                           "Mark one Personal to start restricting the rest.")
             hint.setWordWrap(True)

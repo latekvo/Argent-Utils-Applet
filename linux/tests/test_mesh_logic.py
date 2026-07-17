@@ -311,6 +311,64 @@ def test_accountability_constants_ship_in_the_model():
     assert proto["foreignReminderGraceSecs"] == 900.0
 
 
+def test_ban_of_a_keyed_but_unverified_executor_still_enforces(tmp_path, monkeypatch):
+    """The ban must record the same identity enforcement later checks: an executor
+    that ADVERTISED a key but never proved it (auth never completed) is banned by
+    that advertised fingerprint — banning it by node id alone would let it slip
+    its own ban on the very next classification (which checks the advertised key
+    first and never falls back to the id for a keyed peer)."""
+    if not crypto.AVAILABLE:
+        return
+    import time as _time
+    from argent_utils.mesh import node as node_mod
+    node = _fresh_node(tmp_path, monkeypatch)
+    node._trusted = {"someone-else": ""}  # boundary on → an unverified peer is foreign
+    k = _mk_key()
+    node._learn_node(_peer_info("shady", 1, pubkey=k.public_b64), "1.2.3.4",
+                     _FakeWriter(), raw=_signed_advert(k, "shady"))
+    peer = node.peers["shady"]
+    assert peer.verified_fp is None  # advertised a key, never proved it
+    node._awaiting_result["j1"] = node_mod._Awaiting(
+        executor_id="shady", duty="review", added=_time.monotonic())
+    node._ban_for_broken_promise("j1", "no response to readiness reminder")
+    assert node._banned and node._banned[0]["fingerprint"] == k.fingerprint
+    assert node._peer_trust(peer) == "banned"
+
+
+def test_reminder_resends_across_the_grace_window(tmp_path, monkeypatch):
+    """Reminder delivery is best-effort: if the link is down at the deadline
+    instant, the ask is re-sent once the link heals — with the grace clock
+    unmoved — so an executor holding a result tombstone gets to revive it
+    instead of eating a false silence ban."""
+    if not crypto.AVAILABLE:
+        return
+    import time as _time
+    from argent_utils.mesh import node as node_mod
+    monkeypatch.setenv("ARGENT_MESH_REMINDER_GRACE_SECS", "60")
+    node = _fresh_node(tmp_path, monkeypatch)
+    node._trusted = {"someone-else": ""}  # boundary on → bob is foreign
+    peer, w = _link_peer(node, "bob", _mk_key())
+    aw = node_mod._Awaiting(executor_id="bob", duty="review",
+                            added=_time.monotonic(),
+                            deadline=_time.monotonic() - 1)
+    node._awaiting_result["j9"] = aw
+
+    # Deadline crosses while the link is DOWN: the grace clock starts anyway
+    # (vanishing is not an excuse), but nothing could be delivered.
+    peer.writer = None
+    node._check_foreign_deadlines()
+    first_ask = aw.reminded_at
+    assert first_ask is not None and not w.of("job-reminder")
+
+    # The link heals mid-grace: the next due tick re-asks on the healed link
+    # WITHOUT restarting the grace clock.
+    peer.writer = w
+    aw.next_remind = _time.monotonic() - 1
+    node._check_foreign_deadlines()
+    assert w.of("job-reminder")
+    assert aw.reminded_at == first_ask
+
+
 def test_device_key_proof_of_possession(tmp_path, monkeypatch):
     if not crypto.AVAILABLE:  # dependency-free run without `cryptography`
         return

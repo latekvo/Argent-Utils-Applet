@@ -30,9 +30,15 @@ A node fills one or more roles. Requirements scale with the roles claimed.
 - **Confined-Executor** / **Result-Originator** (optional): an Executor that runs a
   **foreign** request's compute [confined and response-only](13-foreign-execution.md#conformance)
   and returns a `job-result`, and/or a Dispatcher that acts on a returned result
-  under its own identity (`job-ack`ing it, acting at most once). A node that omits the
-  role declines foreign requests and MUST still drop the `job-result`/`job-ack`
-  messages and keep the link.
+  under its own identity (`job-ack`ing it, acting at most once). As of v0.4.0 both
+  halves also carry the [accountability](13-foreign-execution.md#accountability-deadline-reminder-ban)
+  obligations: the executor answers a `job-reminder` truthfully (the result, or a
+  `job-progress`) and marks a personal-path spawn `direct`; an originator that
+  implements accountability arms the completion deadline, reminds only past it,
+  judges a plea through its own extension decision, and bans only a device it
+  classifies foreign. A node that omits the
+  role declines foreign requests and MUST still drop the
+  `job-result`/`job-ack`/`job-reminder`/`job-progress` messages and keep the link.
 
 ## Minimal node
 

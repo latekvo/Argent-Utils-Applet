@@ -176,8 +176,14 @@ weakest-first. It places one job per slot:
 
   **N-B → N-A (TCP):**
   ```json
-  {"t":"job-status","id":"job1","status":"spawned","reason":"","node":"bbbb…","v":1}
+  {"t":"job-status","id":"job1","status":"spawned","reason":"","node":"bbbb…","direct":true,"v":1}
   ```
+
+  (`direct: true` because N-B classified N-A **personal** and ran the job on the
+  [personal path](11-trust-and-balancing.md#the-personal-path-v1) - fire-and-forget,
+  no `job-result` will follow, so an accountability-tracking dispatcher arms no
+  [completion deadline](13-foreign-execution.md#the-completion-deadline). The field
+  is additive; a pre-v0.4.0 node simply omits it.)
 
 N-A assembles the per-slot results and replies to the control client:
 

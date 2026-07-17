@@ -170,10 +170,11 @@ caps. No flag day, no `v` bump required for the common cases - exactly the
 
 - **Cross-subnet / WAN operation.** v1 is single-LAN (link-local multicast, subnet
   broadcast). Federation across subnets is future work.
-- **Foreign zero-trust execution.** The two-level trust model (`personal`/`foreign`,
-  keyed on a peer's **verified device fingerprint** against a local allowlist
-  ([11](11-trust-and-balancing.md))) **has landed**, and so now has foreign
-  **execution**: a node with a [confinement runner](13-foreign-execution.md)
+- **Foreign zero-trust execution.** The trust model (`personal`/`foreign`, keyed on
+  a peer's **verified device fingerprint** against a local allowlist
+  ([11](11-trust-and-balancing.md)), plus the v0.4.0 `banned`
+  [accountability mark](13-foreign-execution.md#the-ban) layered on top) **has
+  landed**, and so now has foreign **execution**: a node with a [confinement runner](13-foreign-execution.md)
   configured runs a foreign request **confined and response-only** — sandboxed
   compute, no host-identity action, the result returned as a
   [`job-result`](04-messages.md#job-result) for the requester to act on — per the

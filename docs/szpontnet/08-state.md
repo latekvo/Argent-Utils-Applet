@@ -199,7 +199,7 @@ client can get it live or from disk.
   "trusted": [{"fingerprint": "9c1f…a7", "label": "mbp"}],
   "banned": [{"fingerprint": "5e2b…c9", "node": "bd4eaf…", "label": "flaky-box",
               "reason": "accepted SzpontRequest b1c2… (review) and failed to deliver: no response to readiness reminder",
-              "bannedAt": 1784057240.5}],
+              "bannedAt": 1784057240.5, "jobId": "b1c2…"}],
   "assignments": {
     "review":    {"duty": "review",    "assigned": ["3236…"], "shortfall": []},
     "conflicts": {"duty": "conflicts", "assigned": ["3236…"], "shortfall": []},
@@ -227,7 +227,7 @@ pinned, else the usage-derived state), not the raw override.
 | `self` | NodeInfo | this node's own advertisement, plus its own `fingerprint` (`sha256` of its advertised `pubkey`, 64 hex — *not* the pubkey itself) and `uptimeSecs` (seconds this node has been running). |
 | `peers` | array | each known peer's NodeInfo plus link decoration: `link` (`up`/`stale`/`down`), `addr` (last-seen source IP), `lastSeenSecsAgo` (float), `uptimeSecs` (float, seconds the current link has been up - `null` while down), plus **this node's local view** of the peer: `verified` (bool - whether the peer *proved possession* of its key on the link), `fingerprint` (the fingerprint it proved, or merely claims if unverified), `trust` (`personal`/`foreign`/`banned`, [11](11-trust-and-balancing.md)) and `surplus` (float - its spare-quota rank score). |
 | `trusted` | array | this node's local allowlist as `[{fingerprint, label}]` - a read-only mirror of [`trusted.json`](#trustedjson). Like the per-peer trust fields it is this node's own view; `trusted.json` and `device.key` are themselves **never gossiped**. |
-| `banned` | array | this node's local ban list as `[{fingerprint, node, label, reason, bannedAt}]` - a read-only mirror of [`banned.json`](#bannedjson) (also never gossiped), so a UI can show the operator **who was marked banned and why**. `[]` when nobody is. |
+| `banned` | array | this node's local ban list as `[{fingerprint, node, label, reason, bannedAt, jobId}]` - a read-only mirror of [`banned.json`](#bannedjson) (also never gossiped), so a UI can show the operator **who was marked banned and why**. `[]` when nobody is. |
 | `assignments` | object | `{duty: {duty, assigned:[node_id], shortfall:[{platform, missing}]}}` - the computed placement ([06](06-coordination.md)). |
 | `overrides` | object | the effective [placement overrides](06-coordination.md#placement-overrides). |
 | `claims` | object | `{workKey: ownerNodeId}` for every currently-owned [work-claim](12-work-claims.md) this node observes (unowned keys omitted); lets a UI show what work is already spoken for. `{}` on a node that implements no work-claims. |

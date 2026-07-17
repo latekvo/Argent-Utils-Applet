@@ -156,6 +156,7 @@ class _Awaiting:
     prompt_head: str = ""  # truncated prompt — context for the extension decider
     deadline: float | None = None  # monotonic; None = accountability not armed
     reminded_at: float | None = None  # monotonic; grace runs from here
+    next_remind: float = 0.0  # monotonic; reminders re-send across the grace window
     extensions: int = 0
     deciding: bool = False
 
@@ -1602,6 +1603,11 @@ class MeshNode:
         the operator vouched for — never tracked."""
         aw = self._awaiting_result.get(job_id)
         if aw is None or direct:
+            # `direct` is taken at the executor's word (job-status is unsigned): a
+            # liar dodges the deadline, but gains nothing over the pre-v0.4.0
+            # world where EVERY acceptance was untracked — and arming anyway would
+            # false-ban every honest asymmetric-trust executor, whose personal
+            # path never owes a result. Deliberate; see ch13 "Limitations".
             return
         if self._peer_trust(self.peers.get(node_id)) != "foreign":
             return
@@ -2027,20 +2033,32 @@ class MeshNode:
             elif now >= aw.reminded_at + grace:
                 self._ban_for_broken_promise(
                     job_id, "no response to readiness reminder")
+            elif now >= aw.next_remind:
+                # Re-ask across the grace window: delivery is best-effort and
+                # links flap — a single send at the deadline instant would turn
+                # an executor that reconnects mid-grace (still holding its
+                # result tombstone) into a false silence ban.
+                self._send_reminder(job_id, aw)
 
     def _send_reminder(self, job_id: str, aw: _Awaiting) -> None:
-        """Ask the late executor "is this ready?". The grace clock starts now
-        whether or not the link is up — a device that accepted work and vanished
-        is not excused by being unreachable."""
-        aw.reminded_at = time.monotonic()
+        """Ask the late executor "is this ready?". The grace clock starts at the
+        FIRST ask whether or not the link is up — a device that accepted work and
+        vanished is not excused by being unreachable — but the ask itself repeats
+        on the result-retry cadence until the window resolves."""
+        now = time.monotonic()
+        first = aw.reminded_at is None
+        if first:
+            aw.reminded_at = now
+        aw.next_remind = now + float(self.proto["foreignResultRetryIntervalSecs"])
         peer = self.peers.get(aw.executor_id)
         if peer is not None and peer.linked:
             with contextlib.suppress(ConnectionError, OSError):
                 peer.writer.write(protocol.encode(
                     protocol.job_reminder(job_id, self.local.id)))
-        activity.log("mesh", "warn",
-                     f"Mesh: reminding {self._node_name(aw.executor_id)} — "
-                     f"{aw.duty} job {job_id[:8]} passed its completion deadline")
+        if first:
+            activity.log("mesh", "warn",
+                         f"Mesh: reminding {self._node_name(aw.executor_id)} — "
+                         f"{aw.duty} job {job_id[:8]} passed its completion deadline")
 
     def _on_job_reminder(self, msg: dict, writer: asyncio.StreamWriter) -> None:
         """Our requester asks whether its job is ready. Truthful answers only:
@@ -2105,7 +2123,14 @@ class MeshNode:
         decider = config.extend_decider()
         granted = False
         if decider:
-            granted = await self._run_extend_decider(decider, job_id, aw, note)
+            try:
+                granted = await self._run_extend_decider(decider, job_id, aw, note)
+            except Exception as exc:  # noqa: BLE001 — a crashed decider grants nothing;
+                # the decision must still conclude (extend or ban), or `deciding`
+                # would wedge the entry past every check until the reap backstop.
+                activity.log("mesh", "warn",
+                             f"Mesh: extension decider crashed: {exc!r}")
+                granted = False
         # Re-fetch: the result may have arrived (entry resolved) while we judged.
         aw = self._awaiting_result.get(job_id)
         if aw is None:
@@ -2181,7 +2206,12 @@ class MeshNode:
         peer = self.peers.get(aw.executor_id)
         if peer is not None and self._peer_trust(peer) == "personal":
             return
-        fp = (peer.verified_fp or "") if peer else ""
+        # Record the same identity _peer_banned later checks: verified key first,
+        # else the ADVERTISED key (signed adverts mean the peer actually holds it,
+        # and a deny-side mark on a claimed identity only ever costs the claimant),
+        # else keyless → node id. Recording only the verified key would let a
+        # keyed-but-never-authed executor slip its own ban on the next check.
+        fp = (peer.verified_fp or crypto.fingerprint_of(peer.info.pubkey)) if peer else ""
         label = peer.info.name if peer else ""
         reason = (f"accepted SzpontRequest {job_id[:8]} ({aw.duty}) "
                   f"and failed to deliver: {cause}")

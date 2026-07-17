@@ -260,14 +260,19 @@ When the deadline passes unresolved, the originator sends a
 [`job-reminder`](04-messages.md#job-reminder) - "is this ready?" - on the
 executor's link, correlated by Job `id`, and gives the executor
 `foreignReminderGraceSecs` ([appendix B](appendix-b-constants.md) - default
-**900 s**) to answer. An executor that receives a valid reminder (correlation
+**900 s**) to answer. Delivery of the reminder is best-effort and links flap, so
+the originator SHOULD **re-send it across the grace window** (the reference
+re-asks on the `foreignResultRetryIntervalSecs` cadence); the grace clock runs
+from the **first** ask either way - being unreachable does not stretch the
+window, but a link that happens to be down at the deadline instant doesn't turn
+a held result into a silence ban. An executor that receives a valid reminder (correlation
 gate: only for a job it received, only from that job's requester link) MUST
 answer truthfully with one of:
 
 - the **[`job-result`](#the-messages)** itself, if the compute finished - a
   reminder also **revives a given-up delivery**: an executor SHOULD retain a
-  computed result (the artifact, not necessarily the in-memory message) for
-  `foreignCompletionDeadlineSecs + foreignReminderGraceSecs` after computing it,
+  computed result (the artifact, not necessarily the in-memory message) for at
+  least `foreignCompletionDeadlineSecs + foreignReminderGraceSecs` after computing it,
   and answer a reminder by re-sending it with the normal
   [retry loop](#reliable-delivery) re-armed. This is what saves an honest
   executor whose originator was unreachable past `foreignResultMaxSecs`;
@@ -291,9 +296,12 @@ Within the grace window, exactly one of four things happens:
    [extension decision](#the-extension-decision). Approved → the deadline
    **re-arms for another full `foreignCompletionDeadlineSecs` window** (the cycle
    can repeat, each round re-judged). Declined → **ban**.
-3. **A non-fulfilling reply arrives** - a `job-result` with `ok: false`, or a
-   malformed/unauthentic one → after six-plus hours and a direct ask, an answer
-   that does not fulfill the task is a broken promise → **ban**.
+3. **A non-fulfilling reply arrives** - a `job-result` with `ok: false` → after
+   six-plus hours and a direct ask, an answer that does not fulfill the task is
+   a broken promise → **ban**. (A malformed or unauthentic reply is simply
+   **dropped** by the [correlation gates](#correlation-and-authenticity), so the
+   grace window runs out and resolution 4 bans for silence - same verdict,
+   reached as a timeout.)
 4. **Nothing arrives** by the end of the grace window → **ban**.
 
 ### The extension decision
@@ -323,9 +331,13 @@ gossiped** - each operator's own ledger of who burned them
 ([`banned.json`](08-state.md#bannedjson), mirrored in the
 [state snapshot](08-state.md#the-statejson-snapshot) so UIs can show it). A ban
 records the device's **verified fingerprint** (the identity that proved itself on
-the link the acceptance arrived on; for a keyless executor, its node id - a
-weaker, best-effort mark), plus the node id, its last known name, the Job id it
-broke its promise on, the reason, and when.
+the link the acceptance arrived on) - or, for a device that advertised a key but
+never proved it, the fingerprint of that **advertised** key: signed
+advertisements mean the device actually holds it, and a deny-side mark on a
+claimed identity only ever costs the claimant. A keyless executor is recorded by
+node id alone - a weaker, best-effort mark. Alongside the identity the record
+keeps the node id, its last known name, the Job id it broke its promise on, the
+reason, and when.
 
 From the moment of the ban, the banning node treats the device as trust level
 **`banned`** ([11](11-trust-and-balancing.md#two-trust-levels)):

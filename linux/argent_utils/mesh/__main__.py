@@ -10,6 +10,8 @@
     python -m argent_utils.mesh --fingerprint                      # print this device's key fp
     python -m argent_utils.mesh --trust <fp> --label mbp           # trust a device (personal)
     python -m argent_utils.mesh --untrust <fp>                     # revoke trust
+    python -m argent_utils.mesh --ban <fp-or-node-id>              # ban a device (declines all)
+    python -m argent_utils.mesh --unban <fp-or-node-id>            # lift a ban
     python -m argent_utils.mesh --dispatch audit --prompt "…"      # route a request
     python -m argent_utils.mesh --dispatch review --prompt-file /tmp/p.txt
     python -m argent_utils.mesh --dispatch review --prompt "…" --target <node-id>

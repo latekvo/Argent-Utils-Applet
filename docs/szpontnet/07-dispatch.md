@@ -149,6 +149,11 @@ status) rather than running when any of:
   [foreign execution security
   contract](11-trust-and-balancing.md#the-foreign-execution-security-contract-normative)
   (sandboxed, no host-identity action, response-only);
+- the requester is **banned** - it is on this node's local
+  [ban list](13-foreign-execution.md#the-ban) (it accepted a SzpontRequest of this
+  node's and failed to deliver it, or the operator banned it manually). Declined
+  outright (reason `"banned device"`), confinement runner or not - the confined
+  path is a favor, and a ban ends it;
 - the request lacks a required **API key** - a
   [server](11-trust-and-balancing.md#the-api-key) configured with one refuses a
   request that doesn't present a matching `apiKey`;
@@ -175,7 +180,9 @@ SzpontNet only requires that the node truthfully report `spawned` vs `failed`.
 > **foreign, confined** job: it too replies `spawned` at hand-off, then returns its
 > computed artifact out of band as a [`job-result`](04-messages.md#job-result) for the
 > originator to act on ([13](13-foreign-execution.md)) - a response to a zero-trust
-> request, not general completion tracking.
+> request, not general completion tracking. As of v0.4.0 that owed result is also
+> **held to a completion deadline**: a foreign acceptance the originator never sees
+> fulfilled ends in a reminder and, unanswered, a [ban](13-foreign-execution.md#accountability-deadline-reminder-ban).
 
 ## Dispatching via a control session
 

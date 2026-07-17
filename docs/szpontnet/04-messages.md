@@ -569,7 +569,8 @@ topology as this node sees it.
                "verified": true, "fingerprint": "…64-hex…", "trust": "personal", "surplus": 1.75 } ],
    "trusted": [ {"fingerprint": "…64-hex…", "label": "mbp"} ],
    "banned": [ {"fingerprint": "…64-hex…", "node": "bd4e…", "label": "flaky-box",
-                "reason": "accepted SzpontRequest b1c2… and failed to deliver", "bannedAt": 1784057240.5} ],
+                "reason": "accepted SzpontRequest b1c2… and failed to deliver", "bannedAt": 1784057240.5,
+                "jobId": "b1c2…"} ],
    "assignments": {"review": {"duty": "review", "assigned": ["…"], "shortfall": []}},
    "overrides": {"rev": 0, "updatedBy": "", "duties": {}},
    "v": 1
@@ -587,7 +588,7 @@ fingerprint of its advertised `pubkey` when not yet verified), `trust`
 `surplus` (float - its spare-quota rank score); a top-level `trusted` array lists
 the local allowlist as `{fingerprint, label}` entries; and a top-level `banned`
 array mirrors the local [ban list](08-state.md#bannedjson) as
-`{fingerprint, node, label, reason, bannedAt}` entries.
+`{fingerprint, node, label, reason, bannedAt, jobId}` entries.
 
 See [08-state](08-state.md#the-statejson-snapshot) for the full snapshot schema.
 
