@@ -199,10 +199,14 @@ class MeshNode:
         self.local = identity.load()
         self.stats = stats.load()  # per-node usage/quota accounting for load balancing
         self.key = crypto.load_or_create()  # this device's Ed25519 trust identity
-        self._trusted = trust.load()  # local allowlist of trusted fingerprints
+        self._trusted = trust.load()  # local allowlist of trusted (personal) fingerprints
         # Local ban list: devices that accepted a SzpontRequest of ours and failed
         # to deliver it (or were banned manually). Machine-local, never gossiped.
         self._banned = banned.load()
+        # Trust level for an UNKNOWN device (not in the allowlist / unverified): the
+        # operator's persisted panel choice if any, else the node baseline (env /
+        # core/mesh.json, ships 'foreign' → a new device is zero-trust until promoted).
+        self._default_trust = trust.load_default_level() or config.default_trust()
         self.platform = identity.detect_platform()
         self.epoch = time.time()
         # Cached automatic token-budget read (refreshed on a throttle, so neither the
@@ -996,19 +1000,20 @@ class MeshNode:
             fp = crypto.fingerprint_of(peer.info.pubkey)
             if fp and peer.verified_fp != fp:
                 peer.verified_fp = fp
-                level = trust.classify(fp, self._trusted)
+                level = trust.classify(fp, self._trusted, self._default_trust)
                 activity.log("mesh", "mesh-peer-up",
                              f"Mesh: verified {peer.info.name} device {fp[:16]} ({level})")
 
     def _peer_trust(self, peer: Peer | None) -> str:
         """personal / foreign / banned for a peer. The ban check runs first: a
         banned device is never anything else. Otherwise the classification comes
-        from the VERIFIED fingerprint against the local allowlist (an unverified
-        peer has no fingerprint -> foreign whenever an allowlist is configured)."""
+        from the VERIFIED fingerprint against the local allowlist, falling back
+        to the node's default trust level (ships foreign, so an unlisted or
+        unverified peer is untrusted until promoted)."""
         if peer is not None and self._peer_banned(peer):
             return "banned"
         fp = peer.verified_fp if peer else None
-        return trust.classify(fp or "", self._trusted)
+        return trust.classify(fp or "", self._trusted, self._default_trust)
 
     def _peer_banned(self, peer: Peer) -> bool:
         """Whether a peer is on the local ban list. Judged by its VERIFIED
@@ -2349,6 +2354,12 @@ class MeshNode:
                 return {"t": "error", "reason": "no matching ban"}
             self._flush_state()
             return {"t": "ok"}
+        if t == "set-default-trust":
+            level = str(msg.get("level", "")).strip().lower()
+            if not self.set_default_trust(level):
+                return {"t": "error", "reason": "level must be 'personal' or 'foreign'"}
+            self._flush_state()
+            return {"t": "ok"}
         if t == "stop":
             self.request_stop()
             return {"t": "ok"}
@@ -2358,7 +2369,7 @@ class MeshNode:
 
     def add_trusted(self, fingerprint: str, label: str = "") -> None:
         self._trusted[fingerprint] = label
-        trust.save(self._trusted)
+        trust.save(self._trusted, self._default_trust)
         # An explicit promotion is the operator's newest word — it lifts any ban
         # (trusted and banned are mutually exclusive states).
         if self.unban_device(fingerprint):
@@ -2370,8 +2381,20 @@ class MeshNode:
 
     def remove_trusted(self, fingerprint: str) -> None:
         if self._trusted.pop(fingerprint, None) is not None:
-            trust.save(self._trusted)
+            trust.save(self._trusted, self._default_trust)
             activity.log("mesh", "mesh-up", f"Mesh: untrusting device {fingerprint[:16]}")
+
+    def set_default_trust(self, level: str) -> bool:
+        """Set the trust level applied to UNKNOWN devices (the panel's default-trust
+        toggle). Persisted in ``trusted.json`` so it survives a restart, and applied
+        live: every unlisted/unverified peer re-classifies on the next snapshot.
+        Returns False for an unrecognised level (caller reports the error)."""
+        if level not in ("personal", "foreign") or level == self._default_trust:
+            return level in ("personal", "foreign")
+        self._default_trust = level
+        trust.save(self._trusted, self._default_trust)
+        activity.log("mesh", "mesh-up", f"Mesh: default trust level for new devices → {level}")
+        return True
 
     # MARK: - ban list (accountability verdicts + operator-managed, local, never gossiped)
 
@@ -2453,6 +2476,10 @@ class MeshNode:
             # The local ban list, mirrored read-only (like `trusted`) so the
             # operator's UI shows who was marked banned and why. Never gossiped.
             "banned": [dict(e) for e in self._banned],
+            # Trust level applied to an UNKNOWN device (not in `trusted`): 'foreign'
+            # by default (a new device is untrusted until promoted), or 'personal'
+            # for a full-trust mesh. Drives the panel's default-trust toggle.
+            "defaultTrust": self._default_trust,
             "assignments": {k: a.to_dict() for k, a in self._assignments.items()},
             "overrides": self.overrides.to_dict(),
             # Active origination leases this node currently observes: work_key →

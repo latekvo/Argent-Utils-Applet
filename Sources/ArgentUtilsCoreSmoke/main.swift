@@ -189,6 +189,7 @@ check(snap.banned[0].fingerprint == "ee22" && snap.banned[0].node == "ccc"
       && snap.banned[0].label == "flaky-box", "banned entry identity")
 check(snap.banned[0].reason.contains("failed to deliver") && snap.banned[0].bannedAt > 0,
       "banned entry reason/time")
+check(snap.banned[0].jobId == "b1c2", "banned entry names the undelivered job")
 check(mesh.trustLevel("banned") != nil, "banned trust level ships in the catalog")
 check(snap.peers.count == 1 && snap.peers[0].link == "up" && snap.peers[0].sees == ["aaa"], "peer decode")
 check(snap.assignments["audit"]?.assigned == ["aaa"], "assignment decode")

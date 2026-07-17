@@ -122,5 +122,10 @@ def unban_device(fingerprint: str = "", node: str = "", timeout: float = 5.0) ->
     request(msg, timeout=timeout)
 
 
+def set_default_trust(level: str, timeout: float = 5.0) -> None:
+    """Set the default trust level for UNKNOWN devices ('personal' | 'foreign')."""
+    request({"t": "set-default-trust", "level": level}, timeout=timeout)
+
+
 def stop(timeout: float = 5.0) -> None:
     request({"t": "stop"}, timeout=timeout)

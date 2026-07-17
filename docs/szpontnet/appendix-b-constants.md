@@ -77,10 +77,10 @@ override is `"auto"`); these constants set the heuristic ceiling it's measured a
 | `foreign` | any other device - unlisted, or it proved no key; its requests are declined by default, or run [confined and response-only](13-foreign-execution.md) when a confinement runner is configured. |
 | `banned` | a device on my local [ban list](13-foreign-execution.md#the-ban) (`~/.argent/mesh/banned.json`) - it broke the [foreign-accountability contract](13-foreign-execution.md#accountability-deadline-reminder-ban) or was banned manually; every request declined, never a dispatch target. |
 
-`trust.default` = `personal` - the classification when the local allowlist is
-**empty** (the trust boundary isn't configured), so a v1 mesh with no trusted
-devices set stays fully trusting until the operator trusts a first fingerprint. See
-[11-trust-and-balancing](11-trust-and-balancing.md).
+`trust.default` = `foreign` - the classification of a device **not** on the local
+allowlist (zero-trust: a new device is untrusted until promoted). Configurable to
+`personal` (full-trust mesh) via `set-default-trust` / `defaultLevel` in
+`trusted.json`. See [11-trust-and-balancing](11-trust-and-balancing.md).
 
 **Trust identity / files.** Each device holds an Ed25519 keypair persisted at
 `~/.argent/mesh/device.key` (`0600`, machine-local, never gossiped); a fingerprint

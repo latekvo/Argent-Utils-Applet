@@ -35,6 +35,7 @@ def contract_env(
     server: bool = False, api_key: str = "", stats: dict | None = None,
     foreign_spawn: str = "", completion_deadline_secs: float | None = None,
     reminder_grace_secs: float | None = None, extend_decider: str = "",
+    default_trust: str = "",
 ) -> dict:
     """The SZPONTNET_* environment a candidate (or its adapter) must honor.
 
@@ -51,6 +52,9 @@ def contract_env(
     ``SZPONTNET_EXTEND_DECIDER`` configures the originator's extension-decision
     command (``{job_file}`` substituted; exit 0 extends, anything else bans) —
     unset, no extension is ever granted, the zero-trust default.
+    ``SZPONTNET_DEFAULT_TRUST`` (ch 11) sets the default trust level for an unlisted
+    device (``personal``/``foreign``); absent, the candidate uses its own shipped
+    default (``foreign`` for the reference — a new device is zero-trust until promoted).
     """
     env = {
         "SZPONTNET_LOOPBACK": "1" if loopback else "0",
@@ -98,6 +102,8 @@ def contract_env(
         env["SZPONTNET_REMINDER_GRACE_SECS"] = str(reminder_grace_secs)
     if extend_decider:
         env["SZPONTNET_EXTEND_DECIDER"] = extend_decider
+    if default_trust:
+        env["SZPONTNET_DEFAULT_TRUST"] = default_trust
     return env
 
 

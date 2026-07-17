@@ -126,7 +126,10 @@ enum Render {
             // `mesh-blocked` additionally sets beaconBlocked, snapshotting the loud
             // "device is not discoverable" banner.
             let _ = seedMesh(store, blocked: m.contains("blocked"))
-            MeshView(isPresented: .constant(true))
+            // `mesh-reminder` pre-opens the "Marked as Personal" in-popover modal (with its
+            // "Don't show again" checkbox) so its layout is snapshot-verifiable headlessly.
+            MeshView(isPresented: .constant(true),
+                     seedTrustReminder: m.contains("reminder") ? "newbox" : nil)
         case "unban-confirm":
             // Seed the ban list and open the inline "Unban @X?" confirmation on a row —
             // proving it renders inside the panel (not as a separate NSAlert window).
@@ -221,6 +224,7 @@ enum Render {
     private static func seedMesh(_ store: Store, blocked: Bool = false) -> Bool {
         let selfID = "n-self-mbp", peerOK = "n-soft-strong", peerDead = "n-soft-weak"
         let peerBanned = "n-flaky-box"
+        let peerNew = "n-newbox"
         let json = """
         {"pid": \(getpid()), "tcpPort": 40878, "v": 1,
          "beaconBlocked": \(blocked),
@@ -238,19 +242,26 @@ enum Render {
             "sees": ["\(selfID)"], "verified": true, "fingerprint": "ee55ff66aa77bb88",
             "trust": "personal", "surplus": 0.75,
             "stats": {"plan": "pro", "usageAvg": 0.25, "quotaLeft": 1.0}},
+           {"id": "\(peerNew)", "name": "newbox", "platform": "windows", "tier": 3,
+            "tokens": "ok", "link": "up", "addr": "192.168.1.44", "lastSeenSecsAgo": 0.8,
+            "tokensAuto": true, "tokensPct": 0.9,
+            "sees": ["\(selfID)"], "verified": true, "fingerprint": "cc99dd00ee11ff22",
+            "trust": "foreign", "surplus": 0.4,
+            "stats": {"plan": "pro", "usageAvg": 0.1, "quotaLeft": 0.5}},
            {"id": "\(peerDead)", "name": "soft-weak", "platform": "linux", "tier": 5,
             "tokens": "low", "link": "down", "addr": "192.168.1.37", "lastSeenSecsAgo": 42,
             "tokensPct": 0.2,
             "sees": [], "verified": false, "fingerprint": "", "trust": "foreign",
             "surplus": 0},
            {"id": "\(peerBanned)", "name": "flaky-box", "platform": "linux", "tier": 3,
-            "tokens": "ok", "link": "up", "addr": "192.168.1.44", "lastSeenSecsAgo": 2.0,
-            "sees": [], "verified": true, "fingerprint": "cc99dd00ee11ff22",
+            "tokens": "ok", "link": "up", "addr": "192.168.1.48", "lastSeenSecsAgo": 2.0,
+            "sees": [], "verified": true, "fingerprint": "dd00ee11ff22aa33",
             "trust": "banned", "surplus": 0}],
          "trusted": [{"fingerprint": "ee55ff66aa77bb88", "label": "softoobox"}],
-         "banned": [{"fingerprint": "cc99dd00ee11ff22", "node": "\(peerBanned)",
+         "banned": [{"fingerprint": "dd00ee11ff22aa33", "node": "\(peerBanned)",
                      "label": "flaky-box", "bannedAt": 1784057240.5,
                      "reason": "accepted SzpontRequest b1c2 (review) and failed to deliver: no response to readiness reminder"}],
+         "defaultTrust": "foreign",
          "assignments": {
            "review": {"duty": "review", "assigned": ["\(peerOK)"], "shortfall": []},
            "conflicts": {"duty": "conflicts", "assigned": ["\(selfID)"], "shortfall": []},

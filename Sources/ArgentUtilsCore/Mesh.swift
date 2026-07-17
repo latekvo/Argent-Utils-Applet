@@ -378,8 +378,11 @@ public struct MeshBannedEntry: Decodable, Equatable {
     public let label: String
     public let reason: String
     public let bannedAt: Double
+    /// The SzpontRequest job whose broken promise triggered the ban ("" for a
+    /// manual ban) — lets a UI link the mark back to the undelivered work.
+    public let jobId: String
 
-    enum CodingKeys: String, CodingKey { case fingerprint, node, label, reason, bannedAt }
+    enum CodingKeys: String, CodingKey { case fingerprint, node, label, reason, bannedAt, jobId }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         fingerprint = (try? c.decode(String.self, forKey: .fingerprint)) ?? ""
@@ -387,6 +390,7 @@ public struct MeshBannedEntry: Decodable, Equatable {
         label = (try? c.decode(String.self, forKey: .label)) ?? ""
         reason = (try? c.decode(String.self, forKey: .reason)) ?? ""
         bannedAt = (try? c.decode(Double.self, forKey: .bannedAt)) ?? 0
+        jobId = (try? c.decode(String.self, forKey: .jobId)) ?? ""
     }
 }
 
@@ -432,6 +436,10 @@ public struct MeshSnapshot: Decodable, Equatable {
     /// The local ban list mirror — who this node marked banned (accepted a
     /// SzpontRequest, failed to deliver) and why. Empty when nobody is.
     public let banned: [MeshBannedEntry]
+    /// The trust level applied to an UNKNOWN device (not in `trusted`): "foreign"
+    /// (zero-trust default — a new device is untrusted until promoted) or "personal"
+    /// (full-trust mesh). Drives the default-trust toggle. Older nodes omit it → "foreign".
+    public let defaultTrust: String
     public let assignments: [String: MeshAssignment]
     public let overrides: MeshOverrides?
     /// Peers mid-handshake right now — drives the "linking to N…" scanning banner.
@@ -442,7 +450,8 @@ public struct MeshSnapshot: Decodable, Equatable {
     public let beaconBlocked: Bool
 
     enum CodingKeys: String, CodingKey {
-        case pid, tcpPort, selfNode = "self", peers, trusted, banned, assignments, overrides,
+        case pid, tcpPort, selfNode = "self", peers, trusted, banned, defaultTrust,
+             assignments, overrides,
              linking, beaconBlocked
     }
 
@@ -454,6 +463,7 @@ public struct MeshSnapshot: Decodable, Equatable {
         peers = (try? c.decode([MeshPeer].self, forKey: .peers)) ?? []
         trusted = (try? c.decode([MeshTrustedEntry].self, forKey: .trusted)) ?? []
         banned = (try? c.decode([MeshBannedEntry].self, forKey: .banned)) ?? []
+        defaultTrust = (try? c.decode(String.self, forKey: .defaultTrust)) ?? "foreign"
         assignments = (try? c.decode([String: MeshAssignment].self, forKey: .assignments)) ?? [:]
         overrides = try? c.decode(MeshOverrides.self, forKey: .overrides)
         linking = (try? c.decode(Int.self, forKey: .linking)) ?? 0

@@ -109,11 +109,12 @@ def _print_status() -> int:
     for p in state.get("peers", []):
         vmark = "✓" if p.get("verified") else "?"
         print(f"peer  {p.get('name')}  {p.get('platform')}  {_strength(p)}"
-              f"  tokens {_tokens(p)}{_acct(p)}  {p.get('trust', 'personal')}{vmark}"
+              f"  tokens {_tokens(p)}{_acct(p)}  {p.get('trust', 'foreign')}{vmark}"
               f"  link {p.get('link')}  {p.get('addr')}  fp {p.get('fingerprint','')[:16]}")
+    print(f"default trust for new devices: {state.get('defaultTrust', 'foreign')}")
     trusted = state.get("trusted", [])
     if trusted:
-        print("trusted  " + ", ".join(
+        print("trusted (personal)  " + ", ".join(
             f"{e.get('fingerprint','')[:16]}{'(' + e['label'] + ')' if e.get('label') else ''}"
             for e in trusted))
     for e in state.get("banned", []):
@@ -191,6 +192,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--unban", metavar="FP|ID", help="lift a ban")
     ap.add_argument("--ban-reason", default="", dest="ban_reason",
                     help="reason recorded with --ban (default: manual)")
+    ap.add_argument("--default-trust", metavar="LEVEL", dest="default_trust",
+                    choices=("personal", "foreign"),
+                    help="set the trust level for UNKNOWN devices (personal|foreign); "
+                    "ships foreign (a new device is untrusted until you promote it)")
     args = ap.parse_args(argv)
 
     if args.daemon:
@@ -230,6 +235,10 @@ def main(argv: list[str] | None = None) -> int:
             fp = args.unban if len(args.unban) == 64 else ""
             ctl.unban_device(fp, "" if fp else args.unban)
             print(f"unbanned {args.unban[:16]}")
+            return 0
+        if args.default_trust:
+            ctl.set_default_trust(args.default_trust)
+            print(f"default trust for new devices → {args.default_trust}")
             return 0
         if args.set_attrs:
             attrs = _parse_attrs(args.set_attrs)

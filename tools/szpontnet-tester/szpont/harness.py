@@ -79,6 +79,7 @@ class Scenario:
         server: bool = False, api_key: str = "", stats: dict | None = None,
         foreign_spawn: str = "", completion_deadline_secs: float | None = None,
         reminder_grace_secs: float | None = None, extend_decider: str = "",
+        default_trust: str = "",
     ) -> None:
         self.node_cmd = shlex.split(node_cmd)
         self.model = model
@@ -103,6 +104,9 @@ class Scenario:
         self.completion_deadline_secs = completion_deadline_secs
         self.reminder_grace_secs = reminder_grace_secs
         self.extend_decider = extend_decider
+        # Chapter-11 default trust level for unlisted devices (empty → candidate's own
+        # shipped default, foreign for the reference).
+        self.default_trust = default_trust
         # The secret the PROBE peers/clients present. Defaults to the candidate's,
         # but a fence test can set a *wrong* one to prove the candidate refuses it.
         self.mesh_secret = secret if mesh_secret is None else mesh_secret
@@ -144,6 +148,7 @@ class Scenario:
             completion_deadline_secs=self.completion_deadline_secs,
             reminder_grace_secs=self.reminder_grace_secs,
             extend_decider=self.extend_decider,
+            default_trust=self.default_trust,
         )
         self.candidate = candmod.Candidate(
             self.node_cmd, env, self.work_dir, secret=self.secret, api_key=self.api_key)
