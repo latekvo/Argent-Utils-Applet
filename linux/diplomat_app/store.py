@@ -15,6 +15,8 @@ from PySide6.QtCore import QObject, QSettings, Signal
 
 import json
 import os
+import re
+import subprocess
 import tempfile
 import threading
 import time
@@ -167,6 +169,9 @@ class Store(QObject):
         # spawning a second agent on a PR one is already working.
         self._autofix_inflight: list[dict] = []
         self._autofix_lock = threading.Lock()
+        # Brief cache over the `ps` live-agent scan (autofix.live_pr_numbers) so one
+        # poll cycle costs one subprocess: (at, pr numbers).
+        self._live_agents_cache: tuple[float, set[int]] | None = None
         # Mesh coordination for the monitor (docs/szpontnet/12): per-duty stand-down
         # state (True while the duty is assigned to other nodes — logged only on
         # transition) and the work keys whose claim suppression was already logged.
@@ -801,7 +806,35 @@ class Store(QObject):
 
     def _in_flight(self, url: str) -> bool:
         self._prune_inflight()
-        return any(e["url"] == url for e in self._autofix_inflight)
+        if any(e["url"] == url for e in self._autofix_inflight):
+            return True
+        # The in-memory list dies with the applet while the agents run on (and its
+        # TTL can lapse under a long-running agent) — any slip used to guarantee a
+        # duplicate dispatch, since the retry backoff (minutes) is far shorter than
+        # an agent's runtime (an hour). A live `claude` whose argv references this
+        # PR is in-flight no matter what our bookkeeping remembers.
+        m = re.search(r"/pull/(\d+)", url)
+        return m is not None and int(m.group(1)) in self._live_pr_agents()
+
+    def _live_pr_agents(self) -> set[int]:
+        """PR numbers with a live claude agent visible in ``ps`` right now (see
+        :func:`autofix.live_pr_numbers`), cached briefly so one poll cycle costs
+        one subprocess. Fails open to an empty set — the tracked list still
+        dedups the common case."""
+        now = time.time()
+        cached = self._live_agents_cache
+        if cached is not None and now - cached[0] < 5:
+            return cached[1]
+        try:
+            out = subprocess.run(
+                ["ps", "-eo", "args="], capture_output=True, text=True, timeout=10
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            out = ""
+        cfg = core.config()
+        refs = autofix.live_pr_numbers(out, cfg["owner"], cfg["repo"])
+        self._live_agents_cache = (now, refs)
+        return refs
 
     # MARK: monitor persistence + poll-error state
 

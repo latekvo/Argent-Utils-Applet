@@ -67,23 +67,94 @@ enum TrackTest {
         //     buffer we couldn't capture conservatively stays "running".
         let busyBuf = "✻ Reticulating…\n──\n❯\n──\n  ⏵⏵ bypass permissions on · esc to interrupt · ← for agents"
         let idleBuf = "✻ Cooked for 3s\n──\n❯ mark threads resolved\n──\n  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+        let sentinel2 = NSTemporaryDirectory() + "argent-tracktest-\(UUID().uuidString)"
+        try? "0".write(toFile: sentinel2, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(atPath: sentinel2) }
         func liveProc(wid: String, tty: String) -> TrackedProcess {
             TrackedProcess(kind: "review", label: "x", terminal: "iterm", windowID: wid,
                            sessionID: "", tty: tty, donePath: "", prURL: nil, createdAt: old)
         }
         let pBusy = liveProc(wid: "OPEN", tty: "/dev/ttysA")     // alive, working
         let pIdle = liveProc(wid: "OPEN", tty: "/dev/ttysB")     // alive, at the prompt
-        let pGone = liveProc(wid: "GONE", tty: "/dev/ttysB")     // window closed → done, idle buffer ignored
+        let pDone = liveProc(wid: "OPEN", tty: "/dev/ttysB")     // done (sentinel), idle buffer ignored
         let pNoTail = liveProc(wid: "OPEN", tty: "/dev/ttysZ")   // alive but buffer not captured
+        var pDoneVar = pDone; pDoneVar.donePath = sentinel2
         let actTails = ["/dev/ttysA": busyBuf, "/dev/ttysB": idleBuf]
-        let actSweep = ProcessMonitor.sweep([pBusy, pIdle, pGone, pNoTail],
-                                            openWindows: windows, sessionTails: actTails)
+        let actSweep = ProcessMonitor.sweep([pBusy, pIdle, pDoneVar, pNoTail],
+                                            openWindows: windows, sessionTails: actTails,
+                                            ttyElapsed: ["ttysA": 70, "ttysB": 70, "ttysZ": 70])
         var awaiting: [UUID: Bool] = [:]
         for p in actSweep.refreshed { awaiting[p.id] = p.awaitingInput }
         check("busy buffer → running (awaitingInput false)", awaiting[pBusy.id] == false)
         check("idle buffer → awaiting input (awaitingInput true)", awaiting[pIdle.id] == true)
-        check("done session never reads awaiting-input", awaiting[pGone.id] == false)
+        check("done session never reads awaiting-input", awaiting[pDoneVar.id] == false)
         check("no captured buffer → stays running (conservative)", awaiting[pNoTail.id] == false)
+
+        // 2e. Window-gone corroboration: a window id missing from the enumeration
+        //     while the session demonstrably lives (still in the session dump — a
+        //     window merged into another as a tab; or its tty still hosts the
+        //     row-aged shell — a transient enumeration miss) must NOT remove the
+        //     row, or the monitor loses in-flight dedup and double-spawns
+        //     (2026-07-20). A tty whose only processes are YOUNGER than the row is a
+        //     recycled pty name, not our session — that close is real.
+        let mGone = liveProc(wid: "GONE", tty: "/dev/ttysM")   // createdAt = old (60s ago)
+        let viaDump = ProcessMonitor.sweep([mGone], openWindows: windows,
+                                           sessionTails: ["/dev/ttysM": idleBuf],
+                                           ttyElapsed: [:])
+        check("window gone but session still dumped → kept (merged into a tab)",
+              !viaDump.closedIDs.contains(mGone.id)
+                && viaDump.refreshed.first?.done == false)
+        let viaTTY = ProcessMonitor.sweep([mGone], openWindows: windows,
+                                          sessionTails: [:],
+                                          ttyElapsed: ["ttysM": 70])
+        check("window gone but row-aged shell on tty → kept (enumeration miss)",
+              !viaTTY.closedIDs.contains(mGone.id))
+        let recycled = ProcessMonitor.sweep([mGone], openWindows: windows,
+                                            sessionTails: [:],
+                                            ttyElapsed: ["ttysM": 5])
+        check("window gone, tty only has younger squatters → done + removed",
+              recycled.closedIDs.contains(mGone.id))
+        let confirmed = ProcessMonitor.sweep([mGone], openWindows: windows,
+                                             sessionTails: [:], ttyElapsed: ["other": 99])
+        check("window gone and tty empty → done + removed",
+              confirmed.closedIDs.contains(mGone.id))
+        let probeFail = ProcessMonitor.sweep([mGone], openWindows: windows,
+                                             sessionTails: [:], ttyElapsed: [:])
+        check("tty probe failed → window verdict decides (gone → removed)",
+              probeFail.closedIDs.contains(mGone.id))
+        // The window list over-reports too: a closed window lingers there for as long
+        // as iTerm's undo-close grace can revive it. A dead tty outvotes it.
+        let mGhost = liveProc(wid: "OPEN", tty: "/dev/ttysG")
+        let ghost = ProcessMonitor.sweep([mGhost], openWindows: windows,
+                                         sessionTails: [:], ttyElapsed: ["other": 99])
+        check("window still listed but tty dead → done + removed (undo-close ghost)",
+              ghost.closedIDs.contains(mGhost.id))
+        let ghostRecycled = ProcessMonitor.sweep([mGhost], openWindows: windows,
+                                                 sessionTails: [:], ttyElapsed: ["ttysG": 5])
+        check("window listed, tty recycled by younger squatter → still removed",
+              ghostRecycled.closedIDs.contains(mGhost.id))
+        check("etime parses mm:ss / hh:mm:ss / dd-hh:mm:ss",
+              ProcessMonitor.parseElapsed("03:07") == 187
+                && ProcessMonitor.parseElapsed("01:02:03") == 3723
+                && ProcessMonitor.parseElapsed("2-00:00:10") == 172_810
+                && ProcessMonitor.parseElapsed("junk") == nil)
+
+        // 2f. Live-agent PR scan: the tracking-independent in-flight signal. A claude
+        //     process whose argv carries "PR #<n> in <owner>/<repo>" is an agent on
+        //     that PR; the spawning shell's unexpanded `$(cat …)` argv and other
+        //     repos' agents must not match.
+        let psDump = """
+        /bin/zsh -i -c cd '/Users/x/repo' 2>/dev/null; claude "$(cat '/tmp/p.txt')"; printf %s $? > '/tmp/d'
+        claude Review PR #436 in software-mansion/argent. Use the `gh` CLI to fetch it.
+        claude Take PR #369 in software-mansion/argent. Use the `gh` CLI to fetch it and check out its branch.
+        claude Review PR #99 in other-org/other-repo. Use the `gh` CLI to fetch it.
+        grep PR #123 in software-mansion/argent
+        claude --dangerously-skip-permissions --effort xhigh
+        """
+        let refs = ProcessMonitor.liveAgentPRNumbers(owner: "software-mansion",
+                                                     repo: "argent", psOutput: psDump)
+        check("live-agent scan finds review + conflict agents, ignores the rest",
+              refs == [436, 369])
 
         // 2d. Live classification (informational): the REAL production dump + predicate
         //     against whatever terminals are open right now, for eyeballing.

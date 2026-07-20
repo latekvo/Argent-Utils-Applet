@@ -238,6 +238,32 @@ def work_key(kind: str, pr_url: str, head_sha: str) -> str:
     return f"{kind}:{host}/{parts[0]}/{parts[1]}#{parts[3]}@{head_sha}"
 
 
+_LIVE_AGENT_RE_TMPL = r"PR #(\d+) in {repo}"
+
+
+def live_pr_numbers(ps_output: str, owner: str, repo: str) -> set[int]:
+    """PR numbers of ``claude`` agents alive in a ``ps`` args dump — the
+    tracking-independent half of the monitor's in-flight dedup (twin of
+    ProcessMonitor.liveAgentPRNumbers on macOS).
+
+    Every single-PR prompt the applet dispatches opens with
+    ``… PR #<n> in <owner>/<repo> …`` and ``claude`` receives the whole prompt as
+    one argv, so a live agent is visible in ``ps`` no matter what happened to the
+    in-memory ``_autofix_inflight`` list (an applet restart wipes it while the
+    agents run on). Only lines containing ``claude`` count: the spawning shell's
+    argv holds the unexpanded ``$(cat …)``, never the prompt text."""
+    import re
+
+    pat = re.compile(_LIVE_AGENT_RE_TMPL.format(repo=re.escape(f"{owner}/{repo}")))
+    out: set[int] = set()
+    for line in ps_output.splitlines():
+        if "claude" not in line:
+            continue
+        for m in pat.finditer(line):
+            out.add(int(m.group(1)))
+    return out
+
+
 def mesh_stand_down(assignments: dict, self_id: str, duty: str) -> list[str] | None:
     """Whether this node's auto-monitor must NOT originate ``duty`` work: the mesh
     assigns the duty to other nodes only (their own monitors originate there, with

@@ -114,6 +114,13 @@ enum ProcessMonitor {
     /// inside this window even if the tty probe misses.
     static let graceInterval: TimeInterval = 5
 
+    /// How much younger than its row a tty's oldest process may be and still count
+    /// as that session's own shell (spawn wrote `createdAt` a settle-delay after the
+    /// shell started, so the genuine shell always PREdates the row — the slack only
+    /// absorbs clock/etime rounding). Anything younger is a squatter on a recycled
+    /// pty name.
+    static let ttyAdoptionSlack: TimeInterval = 10
+
     /// Every controlling tty currently backing a live process (e.g. "ttys016").
     /// One `ps` call covers the whole list of tracked sessions.
     static func aliveTTYs() -> Set<String> {
@@ -192,11 +199,16 @@ enum ProcessMonitor {
     /// alone — we never dismiss on an inconclusive probe. `openWindows` is injectable
     /// for deterministic tests; it defaults to the live `openWindowIDs`.
     /// `sessionTails` (tty → the session's visible terminal buffer) drives the
-    /// running-vs-awaiting-input classification of live sessions; pass `nil` to skip it
-    /// (leaves `awaitingInput` untouched). Injectable for deterministic tests.
+    /// running-vs-awaiting-input classification of live sessions AND corroborates
+    /// window-gone verdicts (a tty still listed among the terminal's sessions means
+    /// the session lives, whatever happened to its window id); pass `nil` when the
+    /// dump failed — it then can't veto anything. Injectable for deterministic tests.
+    /// `ttyElapsed` (tty → its longest-lived process's elapsed seconds) is the
+    /// second corroboration layer; nil = probe `ps` lazily. Injectable for tests.
     static func sweep(_ procs: [TrackedProcess], now: Date = Date(),
                       openWindows: ((SpawnTerminal) -> Set<String>?)? = nil,
-                      sessionTails: [String: String]? = nil) -> Sweep {
+                      sessionTails: [String: String]? = nil,
+                      ttyElapsed: [String: TimeInterval]? = nil) -> Sweep {
         guard !procs.isEmpty else { return Sweep(refreshed: procs, closedIDs: []) }
         let resolve = openWindows ?? { openWindowIDs(term: $0) }
         let fm = FileManager.default
@@ -205,15 +217,51 @@ enum ProcessMonitor {
         for t in Set(procs.map { $0.terminal }) {
             openByTerm[t] = resolve(SpawnTerminal(rawValue: t) ?? .iterm)
         }
+        // Probed at most once per sweep, and only when a window-gone verdict needs
+        // corroborating.
+        var elapsedProbe = ttyElapsed
         var closed = Set<UUID>()
         let out = procs.map { p -> TrackedProcess in
             var p = p
             let sentinel = !p.donePath.isEmpty && fm.fileExists(atPath: p.donePath)
+            // Is this session's terminal window really gone? The window-id enumeration
+            // alone is a poor witness, in BOTH directions: it can drop a window whose
+            // session lives on (dragging a window into another as a tab destroys the
+            // window identity but keeps the session; a transient AppleScript miss
+            // looks identical — removing the row then loses in-flight dedup and the
+            // monitor double-dispatches, 2026-07-20), and it can keep listing a window
+            // the user closed for as long as iTerm's undo-close grace revives it. So
+            // for rows with a captured tty the session evidence decides:
+            // - The session dump still lists the tty → the terminal itself says the
+            //   session exists (maybe under another window id) — ALIVE.
+            // - The tty still hosts a process as old as the row → the session's own
+            //   shell (born before the row) is still running — ALIVE. The age gate
+            //   matters: freed pty NAMES are recycled within seconds on a busy box, so
+            //   "any process on the tty" would adopt strangers; a process predating
+            //   the row can't be a squatter on a later-freed pty.
+            // - Neither, and the tty probe itself worked → the shell is dead, so the
+            //   session is gone whatever the window list claims — CLOSED.
+            // Rows with no captured tty fall back to window-id membership alone, and
+            // an unqueryable terminal app (enumeration nil) never auto-removes.
             var windowClosed = false
-            if !p.windowID.isEmpty,
-               now.timeIntervalSince(p.createdAt) > graceInterval,
-               let open = openByTerm[p.terminal] ?? nil {
-                windowClosed = !open.contains(p.windowID)
+            if now.timeIntervalSince(p.createdAt) > graceInterval {
+                let aliveByDump = !p.tty.isEmpty && sessionTails?[p.tty] != nil
+                var aliveByTTY = false
+                var ttyProbeWorked = false
+                if !p.tty.isEmpty, !aliveByDump {
+                    if elapsedProbe == nil { elapsedProbe = ttyProcessElapsed() }
+                    ttyProbeWorked = !(elapsedProbe?.isEmpty ?? true)
+                    if let oldest = elapsedProbe?[p.shortTTY] {
+                        aliveByTTY = oldest >= now.timeIntervalSince(p.createdAt) - ttyAdoptionSlack
+                    }
+                }
+                if aliveByDump || aliveByTTY {
+                    windowClosed = false
+                } else if !p.tty.isEmpty, ttyProbeWorked {
+                    windowClosed = true
+                } else if !p.windowID.isEmpty, let open = openByTerm[p.terminal] ?? nil {
+                    windowClosed = !open.contains(p.windowID)
+                }
             }
             if windowClosed { closed.insert(p.id) }
             p.done = sentinel || windowClosed
@@ -245,6 +293,91 @@ enum ProcessMonitor {
     static func isWindowAlive(_ p: TrackedProcess) -> Bool {
         guard !p.tty.isEmpty else { return false }
         return aliveTTYs().contains(p.shortTTY)
+    }
+
+    /// Elapsed age (seconds) of the longest-lived process on each tty, from one
+    /// `ps -axo etime=,tty=` pass. `etime` is used (not `lstart`) because its
+    /// `[[dd-]hh:]mm:ss` form is locale-independent.
+    static func ttyProcessElapsed() -> [String: TimeInterval] {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-axo", "etime=,tty="]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        do { try proc.run() } catch { return [:] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        guard let out = String(data: data, encoding: .utf8) else { return [:] }
+        var map: [String: TimeInterval] = [:]
+        for line in out.split(separator: "\n") {
+            let cols = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard cols.count >= 2, let secs = parseElapsed(String(cols[0])) else { continue }
+            let tty = String(cols[1])
+            guard tty != "??" else { continue }
+            map[tty] = max(map[tty] ?? 0, secs)
+        }
+        return map
+    }
+
+    /// Parse `ps` etime (`[[dd-]hh:]mm:ss`) into seconds; nil when malformed.
+    static func parseElapsed(_ s: String) -> TimeInterval? {
+        let dayParts = s.split(separator: "-", omittingEmptySubsequences: false)
+        guard dayParts.count <= 2 else { return nil }
+        let days = dayParts.count == 2 ? Int(dayParts[0]) : 0
+        guard let days else { return nil }
+        let clock = dayParts.count == 2 ? dayParts[1] : dayParts[0]
+        let fields = clock.split(separator: ":", omittingEmptySubsequences: false)
+        guard (1...3).contains(fields.count) else { return nil }
+        var secs = 0
+        for f in fields {
+            guard let v = Int(f), v >= 0 else { return nil }
+            secs = secs * 60 + v
+        }
+        return TimeInterval(days * 86_400 + secs)
+    }
+
+    /// PR numbers of `claude` agents currently alive anywhere on this machine, read
+    /// straight from `ps` argvs: every single-PR prompt the applet dispatches opens
+    /// with "… PR #<n> in <owner>/<repo> …" and `claude` receives the whole prompt
+    /// as one argument, so a live agent is visible no matter what happened to our
+    /// row tracking (applet restart, a swept row, a window merged into a tab). The
+    /// monitor's in-flight dedup ORs this in so it can never double-dispatch onto a
+    /// PR that demonstrably already has an agent. `psOutput` is injectable for
+    /// deterministic tests; nil = run `ps`.
+    static func liveAgentPRNumbers(owner: String, repo: String,
+                                   psOutput: String? = nil) -> Set<Int> {
+        let dump = psOutput ?? fullCommands()
+        guard !dump.isEmpty,
+              let re = try? NSRegularExpression(
+                pattern: "PR #(\\d+) in \(NSRegularExpression.escapedPattern(for: "\(owner)/\(repo)"))")
+        else { return [] }
+        var out = Set<Int>()
+        for line in dump.split(separator: "\n") {
+            // Only a real agent process carries the phrase: the spawning shell's
+            // argv holds the unexpanded `$(cat …)`, not the prompt text.
+            guard line.contains("claude") else { continue }
+            let s = String(line)
+            let range = NSRange(s.startIndex..., in: s)
+            for m in re.matches(in: s, range: range) {
+                if let r = Range(m.range(at: 1), in: s), let n = Int(s[r]) { out.insert(n) }
+            }
+        }
+        return out
+    }
+
+    /// Full argv of every process (`ps -axo command=`), one per line.
+    private static func fullCommands() -> String {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
+        proc.arguments = ["-axo", "command="]
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        do { try proc.run() } catch { return "" }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     /// Bring the session's terminal window to the front. Returns false when the

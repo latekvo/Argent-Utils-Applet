@@ -164,6 +164,10 @@ def store(monkeypatch):
         "diplomat_app.promptcore.build_prompt",
         lambda cfg: f"PROMPT:{cfg.get('kind')}:{cfg.get('specificPR')}",
     )
+    # The ps live-agent fallback would see this MACHINE's real processes —
+    # neutralize it so tests exercise only the tracked-list dedup (the
+    # fallback-specific tests override this).
+    monkeypatch.setattr(Store, "_live_pr_agents", lambda self: set())
     return st
 
 
@@ -467,4 +471,48 @@ def test_conflict_stand_down_only_gates_auto_source(store, monkeypatch):
                                         head_sha="beef") is False
     assert calls == []
     assert store._dispatch_conflict_fix(4, "https://github.com/o/r/pull/4", 1, "panel") is True
+    assert len(calls) == 1
+
+
+# MARK: - live-agent ps fallback (tracking-independent in-flight)
+
+
+def test_live_pr_numbers_parses_agents_only():
+    dump = "\n".join(
+        [
+            # The spawning shell holds the unexpanded $(cat …), never the prompt.
+            "/bin/zsh -i -c cd '/x'; claude \"$(cat '/tmp/p.txt')\"; printf %s $? > '/tmp/d'",
+            "claude Review PR #436 in software-mansion/argent. Use the `gh` CLI to fetch it.",
+            "claude Take PR #369 in software-mansion/argent. Use the `gh` CLI to"
+            " fetch it and check out its branch.",
+            "claude Review PR #99 in other-org/other-repo. Use the `gh` CLI to fetch it.",
+            "grep PR #123 in software-mansion/argent",
+            "claude --dangerously-skip-permissions",
+        ]
+    )
+    assert autofix.live_pr_numbers(dump, "software-mansion", "argent") == {436, 369}
+    assert autofix.live_pr_numbers("", "software-mansion", "argent") == set()
+
+
+def test_in_flight_falls_back_to_live_ps_agents(store, monkeypatch):
+    """An applet restart wipes the in-memory in-flight list while its agents run
+    on (and the TTL can lapse under a long-running one) — the ps live-agent scan
+    must still dedup, or the retry backoff re-spawns onto a working PR."""
+    from diplomat_app.store import Store
+
+    store.review_requests_enabled = False
+    calls = _spawn_recorder(monkeypatch, finish=False)
+    snap = _snap(number=9, mergeable="CONFLICTING")
+    object.__setattr__(snap, "url", "https://github.com/o/r/pull/9")
+    store._save_fingerprints({9: PRFingerprint("MERGEABLE", "", 0)})
+    monkeypatch.setattr(
+        "diplomat_app.autofixmonitor.fetch_snapshots", lambda *a, **k: [snap]
+    )
+    assert store._autofix_inflight == []  # nothing remembered locally…
+    monkeypatch.setattr(Store, "_live_pr_agents", lambda self: {9})
+    store._poll_my_prs("o", "r")
+    assert calls == []  # …yet the agent visible in ps suppressed the dispatch
+    # And with no live agent either, the dispatch goes through.
+    monkeypatch.setattr(Store, "_live_pr_agents", lambda self: set())
+    store._poll_my_prs("o", "r")
     assert len(calls) == 1
