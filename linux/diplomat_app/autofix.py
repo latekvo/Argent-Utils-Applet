@@ -238,6 +238,85 @@ def work_key(kind: str, pr_url: str, head_sha: str) -> str:
     return f"{kind}:{host}/{parts[0]}/{parts[1]}#{parts[3]}@{head_sha}"
 
 
+# MARK: - Unified dispatch gate (one workflow, two triggers)
+#
+# The SPAWN buttons and the auto-monitors are two TRIGGERS for the very same
+# workflow: run one agent job. Everything from "run X (on PR #n)" onward - the
+# ban check, in-flight dedup, mesh coordination, spawn focus, activity label,
+# counters - is decided HERE, once, so the interfaces cannot drift apart.
+# Triggers stay thin: a click, or a poll's backoff decision. (2026-07-20: the
+# drift was not hypothetical - dedup lived only on some paths, dupes followed.)
+#
+# The intended trigger asymmetries, in full (anything else is a bug):
+# - focus: a panel spawn brings the terminal forward, an auto spawn must not
+#   steal focus (moot on Linux - review.spawn is always a new window);
+# - mesh: only auto origination is mesh-gated - a human clicking THIS machine's
+#   button has already decided placement (dispatch_decide);
+# - counters: only a monitor's FIRST dispatch counts as auto-handled work
+#   (dispatch_bumps_counter);
+# - label: auto rows carry the "Auto · " prefix, retries are surfaced the same
+#   way on both (dispatch_label).
+#
+# Swift twin: AgentDispatchGate in DiplomatCore/Autofix.swift - keep semantics
+# byte-equivalent (see the parity tests on both sides).
+
+SOURCE_PANEL = "panel"
+SOURCE_AUTO = "auto"
+
+VERDICT_PROCEED = "proceed"
+VERDICT_IN_FLIGHT = "in_flight"  # an agent already works this PR - whoever asks
+VERDICT_BANNED = "banned"  # prompt-injection ban on the author - whoever asks
+VERDICT_STAND_DOWN = "stand_down"  # mesh: another node originates (auto only)
+
+
+def dispatch_decide(
+    source: str, banned: bool, agent_on_pr: bool, mesh_stands_down: bool
+) -> str:
+    """The one decision both interfaces obey, in fixed precedence: ban, then
+    in-flight, then (auto only) mesh. Mesh comes last so a claim - which has
+    gossip side effects - is only attempted when the job would otherwise run."""
+    if banned:
+        return VERDICT_BANNED
+    if agent_on_pr:
+        return VERDICT_IN_FLIGHT
+    if source == SOURCE_AUTO and mesh_stands_down:
+        return VERDICT_STAND_DOWN
+    return VERDICT_PROCEED
+
+
+def dispatch_label(source: str, core: str, attempt: int = 1) -> str:
+    """The activity/session label both interfaces produce: same core, the source
+    prefix and retry suffix applied identically everywhere."""
+    retry = f" · retry {attempt}" if attempt > 1 else ""
+    prefix = "Auto · " if source == SOURCE_AUTO else ""
+    return f"{prefix}{core}{retry}"
+
+
+def dispatch_bumps_counter(source: str, attempt: int) -> bool:
+    """Auto-handled counters bump only on a monitor's first dispatch - a retry is
+    not new work handled, and a manual run is the user's own action."""
+    return source == SOURCE_AUTO and attempt == 1
+
+
+@dataclass(frozen=True)
+class AgentJob:
+    """One agent job, whoever triggers it. The trigger supplies WHAT to run
+    (config -> prompt, labels, PR identity); the store's ``dispatch_agent`` owns
+    everything that HAPPENS - ban check, in-flight dedup, mesh policy, spawn,
+    registration, counters. Twin of Store.AgentJob on macOS."""
+
+    kind: str  # activity tint: "review" | "conflicts" | "audit"
+    audit_action: str  # activity-feed verb
+    label: str  # label core (source prefix / retry suffix added by dispatch_label)
+    prompt: str
+    pr_url: str | None = None  # None = not PR-scoped -> no PR dedup possible
+    pr_number: int | None = None
+    author_login: str | None = None  # whose PR we'd review - the ban dimension
+    duty: str = ""  # mesh duty, for auto-origination gating
+    work_key: str = ""  # mesh claim key ("" = no claim)
+    counter: str | None = None  # "review_requests" | "my_reviews" | "conflicts"
+
+
 _LIVE_AGENT_RE_TMPL = r"PR #(\d+) in {repo}"
 
 

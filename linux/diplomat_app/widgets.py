@@ -400,3 +400,20 @@ def hline() -> QFrame:
     line.setFrameShape(QFrame.Shape.HLine)
     line.setStyleSheet("color: rgba(128,128,128,0.3);")
     return line
+
+
+def dispatch_status_text(verdict: str, terminal_title: str) -> str:
+    """The wizard status line for one ``Store.dispatch_agent`` verdict - shared by
+    all three wizards so refusals read identically everywhere (macOS twin:
+    ``statusText(for:terminal:)``)."""
+    from . import autofix
+
+    if verdict == "spawned":
+        return f"Launched {terminal_title}"
+    if verdict == autofix.VERDICT_IN_FLIGHT:
+        return "An agent is already on this PR - see its session above."
+    if verdict == autofix.VERDICT_BANNED:
+        return "Author is banned for prompt injection - un-ban to review."
+    if verdict == autofix.VERDICT_STAND_DOWN:
+        return "Another mesh node originates this work."
+    return "Spawn failed - see the activity feed."

@@ -45,6 +45,9 @@ class WizardView(QWidget):
         # Specific-PR author disposition (mine / theirs / unknown) + loading flag,
         # resolved off the UI thread - mirrors ReviewWizardView's @State in Swift.
         self._specific_author = SpecificAuthor.UNKNOWN
+        # The polled author login itself (macOS: specificAuthorLogin) - the
+        # pipeline's ban dimension; only read while the THEIRS disposition holds.
+        self._specific_author_login: str | None = None
         self._author_loading = False
         # The PR text the in-flight poll was launched for (debounce/supersede guard).
         self._author_pending: str | None = None
@@ -322,6 +325,7 @@ class WizardView(QWidget):
             return
         self._author_loading = False
         me = self.store.effective_me
+        self._specific_author_login = login or None
         if login and me:
             self._specific_author = (
                 SpecificAuthor.MINE if login.lower() == me.lower() else SpecificAuthor.THEIRS
@@ -339,24 +343,50 @@ class WizardView(QWidget):
         self._sync()
 
     def _spawn(self) -> None:
-        from . import activity
+        from . import activity, autofix, widgets
 
         cfg = self._config()
         scope = cfg.specific_pr.strip() or "PRs"
+        label = f"Review · {scope} · {cfg.depth}"
         if self.mesh_row.use_mesh():
             self.spawn_btn.setEnabled(False)
             self.status.setText("Dispatching over the mesh…")
-            activity.log("panel", "review", f"Review · {scope} · {cfg.depth} · via mesh")
+            activity.log("panel", "review", f"{label} · via mesh")
             self.mesh_row.dispatch(cfg.build_prompt())
             return
+        # Local: the SAME pipeline the auto-monitor rides - dedup, ban check,
+        # registration - only the trigger (this click) and its policies differ
+        # (see autofix.dispatch_decide).
         term = review.resolved(self.store.terminal)
-        try:
-            review.spawn(cfg.build_prompt(), self.store.terminal)
-            self.status.setText(f"Launched {term.title}")
-            activity.log("panel", "review", f"Review · {scope} · {cfg.depth}")
-            self.store.refresh_activity()
-        except Exception as exc:  # noqa: BLE001
-            self.status.setText(f"Failed: {exc}")
+        number = cfg.pr_ref.number if cfg.target == PRTarget.SPECIFIC else None
+        owner, repo = cfg.target_repo
+        url = f"https://github.com/{owner}/{repo}/pull/{number}" if number else None
+        verdict = self.store.dispatch_agent(
+            autofix.AgentJob(
+                kind="review",
+                audit_action="review",
+                label=label,
+                prompt=cfg.build_prompt(),
+                pr_url=url,
+                pr_number=number,
+                author_login=self._reviewed_author_login(),
+                duty="review",
+            ),
+            autofix.SOURCE_PANEL,
+        )
+        self.status.setText(widgets.dispatch_status_text(verdict, term.title))
+
+    def _reviewed_author_login(self) -> str | None:
+        """Whose PRs this run would review, when known - the pipeline's ban
+        dimension. My own PRs have none; a specific PR's author comes from the
+        debounced poll (only trusted while its THEIRS disposition holds)."""
+        target = self.target.currentData()
+        if target == PRTarget.SOMEONE:
+            handle = self.username.text().strip()
+            return handle or None
+        if target == PRTarget.SPECIFIC and self._specific_author == SpecificAuthor.THEIRS:
+            return self._specific_author_login
+        return None
 
     def _mesh_done(self, results: list, err: str) -> None:
         self.spawn_btn.setEnabled(True)

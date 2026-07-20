@@ -98,6 +98,73 @@ public enum AutofixDiff {
     }
 }
 
+// MARK: - Unified dispatch gate (one workflow, two triggers)
+
+/// The SPAWN buttons and the auto-monitors are two TRIGGERS for the very same
+/// workflow: run one agent job. Everything from "run X (on PR #n)" onward — the
+/// ban check, in-flight dedup, mesh coordination, spawn focus, activity label,
+/// counters — is decided HERE, once, so the interfaces cannot drift apart.
+/// Triggers stay thin: a click, or a poll's backoff decision. (2026-07-20: the
+/// drift was not hypothetical — dedup lived only on some paths, dupes followed.)
+///
+/// The intended trigger asymmetries, in full (anything else is a bug):
+/// - focus: a panel spawn brings the terminal forward, an auto spawn never steals
+///   focus (`stealsFocus`);
+/// - mesh: only auto origination is mesh-gated — a human clicking THIS machine's
+///   button has already decided placement (`decide`);
+/// - counters: only a monitor's FIRST dispatch counts as auto-handled work
+///   (`bumpsCounter`);
+/// - label: auto rows carry the "Auto · " prefix, retries are surfaced the same
+///   way on both (`label`).
+///
+/// Python twin: `autofix.dispatch_decide` etc. — keep byte-equivalent semantics
+/// (see the parity tests on both sides).
+public enum AgentDispatchGate {
+    public enum Source: String {
+        case panel, auto
+    }
+
+    public enum Verdict: Equatable {
+        /// Run it.
+        case proceed
+        /// An agent is already working this PR (tracked row or a live `claude`
+        /// visible in `ps`) — never double-spawn, whoever asks.
+        case inFlight
+        /// The author is on the prompt-injection ban list — never agent-review
+        /// them, whoever asks. (Un-ban first if that is really wanted.)
+        case banned
+        /// Mesh: another live node originates this work (auto only).
+        case standDown
+    }
+
+    /// The one decision both interfaces obey, in fixed precedence: ban, then
+    /// in-flight, then (auto only) mesh. Mesh comes last so a claim — which has
+    /// gossip side effects — is only attempted when the job would otherwise run.
+    public static func decide(source: Source, banned: Bool, agentOnPR: Bool,
+                              meshStandsDown: Bool) -> Verdict {
+        if banned { return .banned }
+        if agentOnPR { return .inFlight }
+        if source == .auto, meshStandsDown { return .standDown }
+        return .proceed
+    }
+
+    /// Panel spawns come to the front; auto spawns must never steal focus.
+    public static func stealsFocus(_ source: Source) -> Bool { source == .panel }
+
+    /// The activity/session label both interfaces produce: same core, the source
+    /// prefix and retry suffix applied identically everywhere.
+    public static func label(source: Source, core: String, attemptNumber: Int = 1) -> String {
+        let retry = attemptNumber > 1 ? " · retry \(attemptNumber)" : ""
+        return (source == .auto ? "Auto · " : "") + core + retry
+    }
+
+    /// Auto-handled counters bump only on a monitor's first dispatch — a retry is
+    /// not new work handled, and a manual run is the user's own action.
+    public static func bumpsCounter(source: Source, attemptNumber: Int) -> Bool {
+        source == .auto && attemptNumber == 1
+    }
+}
+
 // MARK: - Mesh coordination for the auto-monitors (mirrors autofix.py's twin)
 //
 // Two machines running this monitor poll the same GitHub state as the same user, so

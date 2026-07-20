@@ -14,8 +14,8 @@
 
 A tiny **menu-bar / system-tray applet** - a personal dashboard of Argent-repo
 triage tools. Click the wrench, get a dense two-column panel with six utilities,
-three spawn-an-agent actions (Review PRs, Resolve conflicts, Full E2E test) and,
-on macOS, a set of [autonomous monitors](#autonomous-monitors-macos) that spawn
+three spawn-an-agent actions (Review PRs, Resolve conflicts, Full E2E test) and
+a set of [autonomous monitors](#autonomous-monitors) that spawn
 those agents without being asked. Hacky on purpose, optimized for *me*, not the
 public.
 
@@ -25,8 +25,18 @@ Targets `software-mansion/argent` and shells out to the authenticated `gh` CLI.
 > [Linux Qt6/PySide6 applet](linux/README.md) are thin UI renderers over a shared,
 > language-neutral [`core/`](core/README.md): the GraphQL queries, tool catalog,
 > filter constants and prompt fragments are single-sourced, and golden-prompt tests
-> on both sides fail CI on prompt drift. The autonomous monitor stack is macOS-only;
-> the Linux applet is a viewer + wizards port. See **[Architecture](#architecture)**.
+> on both sides fail CI on prompt drift. Both applets run the full autonomous
+> monitor stack. See **[Architecture](#architecture)**.
+>
+> **One pipeline, two triggers.** A wizard's SPAWN button and an auto-monitor's
+> poll tick are two *triggers* for the very same dispatch pipeline
+> (`Store.dispatchAgent` / `store.dispatch_agent`): the ban check, in-flight
+> dedup (tracked sessions plus a `ps` ground-truth scan), mesh coordination,
+> spawn, session tracking, and counters live in exactly one place per platform.
+> The only trigger asymmetries are the documented ones in `AgentDispatchGate`
+> (its Python twin `autofix.dispatch_decide`): manual spawns come to the
+> foreground and are never mesh-gated, and only monitor dispatches bump the
+> auto-handled counters. Parity tests on both sides pin that matrix.
 
 ## The library
 
@@ -217,9 +227,9 @@ quota left — see `accounts` in `core/mesh.json`): the default `surplus-first`
 dispatch ranking sends work to the machine with the most spare quota, and each
 executed job books usage on the executor.
 
-## Autonomous monitors (macOS)
+## Autonomous monitors
 
-The macOS applet doesn't just render lists - it acts on them. Three background
+The applets don't just render lists - they act on them. Three background
 monitors ship **ON by default** (opt out in Settings). Know what that means
 before running it: they **spawn real terminal windows** running `claude` agents,
 and the auto-fix agents **push to your PR branches**. Those background windows
@@ -324,7 +334,7 @@ for tuning/testing:
 DIPLOMAT_REFRESH_SECS=30 open ./Diplomat.app   # refresh every 30s
 ```
 
-This is the tool-data cadence only - the [autonomous monitors](#autonomous-monitors-macos)
+This is the tool-data cadence only - the [autonomous monitors](#autonomous-monitors)
 poll GitHub on their own 3-minute schedule.
 
 ## Run

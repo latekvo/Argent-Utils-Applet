@@ -743,22 +743,45 @@ struct ReviewWizardView: View {
             }
             return
         }
-        let preferred = store.terminal
-        let term = AgentSpawner.resolved(preferred)
-        let label = trackingLabel
-        let prURL = trackingPRURL
+        // Local: the SAME pipeline the auto-monitor rides — dedup, ban, tracking —
+        // only the trigger (this click) and its policies (foreground, no mesh gate)
+        // differ. See `AgentDispatchGate`.
+        let term = AgentSpawner.resolved(store.terminal)
+        let job = Store.AgentJob(kind: "review", auditAction: "review",
+                                 label: trackingLabel, prompt: cfg.buildPrompt(),
+                                 prURL: trackingPRURL,
+                                 prNumber: target == .specific ? cfg.prRef.number : nil,
+                                 authorLogin: reviewedAuthorLogin, duty: "review",
+                                 workKey: "", counter: nil)
         status = "Launching \(term.title)…"
-        Task.detached {
-            do {
-                let result = try AgentSpawner.spawn(cfg.buildPrompt(), terminal: preferred)
-                await MainActor.run {
-                    store.track(kind: "review", label: label, prURL: prURL, result: result)
-                    status = "Launched \(term.title) · \(Fmt.clock(Date()))"
-                }
-            } catch {
-                let msg = (error as? LocalizedError)?.errorDescription ?? "\(error)"
-                await MainActor.run { status = "Failed: \(msg)" }
-            }
+        Task {
+            status = statusText(for: await store.dispatchAgent(job, source: .panel),
+                                terminal: term.title)
         }
+    }
+
+    /// Whose PRs this run would review, when known — the pipeline's ban dimension.
+    /// (My own PRs have no ban dimension; a specific PR's author comes from the
+    /// wizard's debounced poll and may still be unknown.)
+    private var reviewedAuthorLogin: String? {
+        switch target {
+        case .mine: return nil
+        case .someone:
+            let u = username.trimmingCharacters(in: .whitespaces)
+            return u.isEmpty ? nil : u
+        case .specific: return specificAuthorLogin
+        }
+    }
+}
+
+/// The wizard status line for one dispatch outcome — shared by all three wizards
+/// so refusals read identically everywhere.
+func statusText(for outcome: Store.DispatchOutcome, terminal: String) -> String {
+    switch outcome {
+    case .spawned: return "Launched \(terminal) · \(Fmt.clock(Date()))"
+    case .inFlight: return "An agent is already on this PR — see its session above."
+    case .banned: return "Author is banned for prompt injection — un-ban to review."
+    case .standDown: return "Another mesh node originates this work."
+    case .failed(let msg): return "Failed: \(msg)"
     }
 }

@@ -180,9 +180,14 @@ struct ConflictWizardView: View {
     /// The one PR this run concerns (single-PR mode only) — the open-in-browser
     /// fallback when its window can't be focused.
     private var trackingPRURL: String? {
-        guard target == .specific, let n = config.prRef.number else { return nil }
+        guard let n = specificNumber else { return nil }
         let (owner, repo) = config.targetRepo
         return "https://github.com/\(owner)/\(repo)/pull/\(n)"
+    }
+
+    /// The single PR's number (single-PR mode only) — the pipeline's dedup key.
+    private var specificNumber: Int? {
+        target == .specific ? config.prRef.number : nil
     }
 
     private func spawn() {
@@ -199,22 +204,19 @@ struct ConflictWizardView: View {
             }
             return
         }
-        let preferred = store.terminal
-        let term = AgentSpawner.resolved(preferred)
-        let label = trackingLabel
-        let prURL = trackingPRURL
+        // Local: the SAME pipeline the auto-monitor rides — dedup, ban, tracking —
+        // only the trigger (this click) and its policies (foreground, no mesh gate)
+        // differ. See `AgentDispatchGate`.
+        let term = AgentSpawner.resolved(store.terminal)
+        let job = Store.AgentJob(kind: "conflicts", auditAction: "conflicts",
+                                 label: trackingLabel, prompt: cfg.buildPrompt(),
+                                 prURL: trackingPRURL, prNumber: specificNumber,
+                                 authorLogin: nil, duty: "conflicts",
+                                 workKey: "", counter: nil)
         status = "Launching \(term.title)…"
-        Task.detached {
-            do {
-                let result = try AgentSpawner.spawn(cfg.buildPrompt(), terminal: preferred)
-                await MainActor.run {
-                    store.track(kind: "conflicts", label: label, prURL: prURL, result: result)
-                    status = "Launched \(term.title) · \(Fmt.clock(Date()))"
-                }
-            } catch {
-                let msg = (error as? LocalizedError)?.errorDescription ?? "\(error)"
-                await MainActor.run { status = "Failed: \(msg)" }
-            }
+        Task {
+            status = statusText(for: await store.dispatchAgent(job, source: .panel),
+                                terminal: term.title)
         }
     }
 }

@@ -117,27 +117,34 @@ class AuditWizardView(QWidget):
         validate, but the panel calls this on every data refresh)."""
 
     def _spawn(self) -> None:
-        from . import activity
+        from . import activity, autofix, widgets
 
         cfg = self._config()
         extra = " · ".join(
             x for x in (["issues"] if cfg.fix_issues else []) + (["open PRs"] if cfg.open_prs else []) if x
         )
+        label = f"Full E2E audit{(' · ' + extra) if extra else ''}"
         if self.mesh_row.use_mesh():
             self.spawn_btn.setEnabled(False)
             self.status.setText("Dispatching over the mesh…")
-            activity.log("panel", "audit",
-                         f"Full E2E audit{(' · ' + extra) if extra else ''} · via mesh")
+            activity.log("panel", "audit", f"{label} · via mesh")
             self.mesh_row.dispatch(cfg.build_prompt())
             return
+        # Local: the SAME pipeline the auto-monitor rides - only the trigger (this
+        # click) and its policies differ. Audits aren't PR-scoped, so there is no
+        # dedup key (see autofix.dispatch_decide).
         term = review.resolved(self.store.terminal)
-        try:
-            review.spawn(cfg.build_prompt(), self.store.terminal)
-            self.status.setText(f"Launched {term.title}")
-            activity.log("panel", "audit", f"Full E2E audit{(' · ' + extra) if extra else ''}")
-            self.store.refresh_activity()
-        except Exception as exc:  # noqa: BLE001
-            self.status.setText(f"Failed: {exc}")
+        verdict = self.store.dispatch_agent(
+            autofix.AgentJob(
+                kind="audit",
+                audit_action="audit",
+                label=label,
+                prompt=cfg.build_prompt(),
+                duty="audit",
+            ),
+            autofix.SOURCE_PANEL,
+        )
+        self.status.setText(widgets.dispatch_status_text(verdict, term.title))
 
     def _mesh_done(self, results: list, err: str) -> None:
         self.spawn_btn.setEnabled(True)

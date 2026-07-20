@@ -648,8 +648,8 @@ final class Store: ObservableObject {
                                                   inFlight: inFlight, banned: false, now: now)
             if case .dispatch(let attemptNumber) = decision {
                 if await dispatchConflictFix(number: s.number, url: s.url,
-                                             attemptNumber: attemptNumber, source: "auto",
-                                             headSha: s.headSha) {
+                                             attemptNumber: attemptNumber, source: .auto,
+                                             headSha: s.headSha).didSpawn {
                     attempts[key] = ReviewAttempt(requestedAt: "conflicting",
                                                   lastDispatchedAt: now, attempts: attemptNumber)
                 }
@@ -781,11 +781,17 @@ final class Store: ObservableObject {
     /// shorter than an agent's runtime (an hour), so any tracking slip used to
     /// guarantee a duplicate dispatch onto a PR that already had an agent.
     private func livePRAgents() async -> Set<Int> {
+        if let c = liveAgentsCache, Date().timeIntervalSince(c.at) < 5 { return c.refs }
         let (owner, repo) = coreRepo
-        return await Task.detached(priority: .utility) {
+        let refs = await Task.detached(priority: .utility) {
             ProcessMonitor.liveAgentPRNumbers(owner: owner, repo: repo)
         }.value
+        liveAgentsCache = (Date(), refs)
+        return refs
     }
+    /// Brief cache over the `ps` scan so one poll cycle (reconcilers + each
+    /// dispatch gate) costs one subprocess, mirroring the Linux store.
+    private var liveAgentsCache: (at: Date, refs: Set<Int>)?
 
     /// The app the user is currently working in, so a background (auto-fix) spawn can
     /// bounce focus straight back to it instead of yanking them into a new terminal
@@ -854,54 +860,154 @@ final class Store: ObservableObject {
         }
     }
 
-    /// Spawn the most-comprehensive Review action (Full E2E ×2, formal per-line comments,
-    /// no auto-verdict) on a PR someone asked me to review — hands off the branch.
-    /// `attemptNumber` ≥2 means this is a retry of a review a previous agent left
-    /// unaddressed; it's surfaced in the label/audit so the re-dispatch is visible.
+    // MARK: - The one dispatch pipeline (buttons and monitors are triggers, not paths)
+
+    /// One agent job, whoever triggers it. The trigger supplies WHAT to run (config
+    /// → prompt, labels, PR identity); the pipeline owns everything that HAPPENS —
+    /// the ban check, in-flight dedup, mesh policy, spawn, tracking, counters — so
+    /// a button click and a monitor tick cannot behave differently by accident.
+    struct AgentJob {
+        var kind: String            // tracked-row tint: "review" | "conflicts" | "audit"
+        var auditAction: String     // activity-feed verb
+        var label: String           // label core (source prefix / retry suffix added by the gate)
+        var prompt: String
+        var prURL: String?          // nil = not PR-scoped (sweeps, audits) → no PR dedup possible
+        var prNumber: Int?
+        var authorLogin: String?    // whose PR we'd be reviewing — the ban dimension (nil = none)
+        var duty: String            // mesh duty, for auto-origination gating
+        var workKey: String         // mesh claim key ("" = no claim)
+        var counter: AutoCounter?   // which auto-handled tally a monitor dispatch feeds
+    }
+
+    enum AutoCounter { case reviewRequests, myReviews, conflicts }
+
+    /// What one dispatch did — wizards surface it as status text; monitors only
+    /// care whether it spawned.
+    enum DispatchOutcome: Equatable {
+        case spawned(terminal: String)
+        case inFlight
+        case banned
+        case standDown
+        case failed(String)
+        var didSpawn: Bool { if case .spawned = self { return true }; return false }
+    }
+
+    /// Run one agent job through the shared gate (`AgentDispatchGate` — the pure,
+    /// smoke-tested decision both platforms mirror) and, on `.proceed`, spawn +
+    /// track it. `resolvingPRs` is taken for the whole await span of any PR-scoped
+    /// job, so a double-click or an overlapping poll can't race two spawns onto
+    /// one PR (it also drives the panel row's spinner). In-flight evidence is the
+    /// tracked rows OR a live `claude` visible in `ps` — the ground-truth floor
+    /// that also catches agents whose local bookkeeping was lost and mesh jobs
+    /// that landed on this very machine.
+    @discardableResult
+    func dispatchAgent(_ job: AgentJob, source: AgentDispatchGate.Source,
+                       attemptNumber: Int = 1) async -> DispatchOutcome {
+        if let n = job.prNumber {
+            if resolvingPRs.contains(n) { return .inFlight }
+            resolvingPRs.insert(n)
+        }
+        defer { if let n = job.prNumber { resolvingPRs.remove(n) } }
+        let banned = job.authorLogin.map { BanList.isBanned($0, in: BanList.read()) } ?? false
+        var agentOnPR = false
+        if let url = job.prURL {
+            agentOnPR = processes.contains { $0.prURL == url && !$0.done }
+            if !agentOnPR, let n = job.prNumber {
+                agentOnPR = await livePRAgents().contains(n)
+            }
+        }
+        // Mesh last, and only when the job would otherwise run: a claim has gossip
+        // side effects. Only auto origination is gated — a human clicking THIS
+        // machine's button has already decided placement.
+        var meshStandsDown = false
+        if !banned, !agentOnPR, source == .auto {
+            meshStandsDown = await meshMonitorStandsDown(duty: job.duty, workKey: job.workKey,
+                                                         what: job.label)
+        }
+        switch AgentDispatchGate.decide(source: source, banned: banned,
+                                        agentOnPR: agentOnPR, meshStandsDown: meshStandsDown) {
+        case .banned:
+            AuditLog.log(source.rawValue, "ban-skip",
+                         "\(job.label) — author is banned (un-ban to review)")
+            refreshAudit()
+            return .banned
+        case .inFlight:
+            // A monitor tick hitting a busy PR is routine (stays silent); a click
+            // deserves an answer for why nothing opened.
+            if source == .panel {
+                AuditLog.log("panel", "in-flight",
+                             "\(job.label) — an agent is already on this PR")
+                refreshAudit()
+            }
+            return .inFlight
+        case .standDown:
+            return .standDown   // logged (once per transition/key) by the gate
+        case .proceed:
+            break
+        }
+        let preferred = terminal
+        let restoreBID = AgentDispatchGate.stealsFocus(source) ? nil : frontmostAppBundleID
+        let prompt = job.prompt
+        do {
+            let result = try await Task.detached(priority: .userInitiated) {
+                try AgentSpawner.spawn(prompt, terminal: preferred, restoreFocusTo: restoreBID)
+            }.value
+            track(kind: job.kind,
+                  label: AgentDispatchGate.label(source: source, core: job.label,
+                                                 attemptNumber: attemptNumber),
+                  prURL: job.prURL, result: result, source: source.rawValue,
+                  auditAction: job.auditAction)
+            // Retries are re-dispatches, not new work handled — count once, and
+            // only for the monitor (a manual run is the user's own action).
+            if AgentDispatchGate.bumpsCounter(source: source, attemptNumber: attemptNumber) {
+                switch job.counter {
+                case .reviewRequests: reviewRequestsHandled += 1
+                case .myReviews: autofixReviewsHandled += 1
+                case .conflicts: autofixConflictsHandled += 1
+                case nil: break
+                }
+            }
+            return .spawned(terminal: result.terminal.rawValue)
+        } catch {
+            let msg = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            AuditLog.log(source.rawValue, "spawn-failed",
+                         "\(job.label) failed to spawn: \(msg)")
+            refreshAudit()
+            return .failed(msg)
+        }
+    }
+
+    /// Review a PR someone asked me to review (most-comprehensive depth, formal
+    /// per-line comments; verdict only under the auto-approve policy) — the
+    /// review-request monitor's job builder. `attemptNumber` ≥2 means a retry of a
+    /// review a previous agent left unaddressed.
     @discardableResult
     private func dispatchReviewRequest(_ r: AutofixMonitor.ReviewRequest, attemptNumber: Int = 1) async -> Bool {
-        if await meshMonitorStandsDown(
-            duty: "review",
-            workKey: AutofixMesh.workKey(kind: AutofixMesh.kindReviewReq,
-                                         prURL: r.url, headSha: r.headSha),
-            what: "Review-req #\(r.number)") { return false }
         // Auto-approvals must be enabled AND no configured suppressor may match (SKILL /
         // installer / community PR) for an auto-review to submit a verdict. Otherwise it's
         // comments-only and the final call stays with me.
         let reasons = verdictPolicy.withholdReasons(files: r.files, authorAssociation: r.authorAssociation)
         let verdict = autoApproveEnabled && reasons.isEmpty
+        let tag: String
+        if verdict {
+            tag = " +verdict"
+        } else if !autoApproveEnabled {
+            tag = " −verdict (auto-approvals off)"
+        } else {
+            tag = " −verdict (\(reasons.joined(separator: ", ")))"
+        }
         let prompt = ReviewConfig(depth: "max", target: .specific, me: effectiveMe,
                                   markReady: false, leaveReviews: true, replyToReviews: false,
                                   specificPR: String(r.number), finalPass: verdict,
                                   specificAuthor: .theirs).buildPrompt()
-        let preferred = terminal
-        // Auto-dispatch: open the terminal in the background, keeping the user's focus.
-        let restoreBID = frontmostAppBundleID
-        do {
-            let result = try await Task.detached(priority: .userInitiated) {
-                try AgentSpawner.spawn(prompt, terminal: preferred, restoreFocusTo: restoreBID)
-            }.value
-            let tag: String
-            if verdict {
-                tag = " +verdict"
-            } else if !autoApproveEnabled {
-                tag = " −verdict (auto-approvals off)"
-            } else {
-                tag = " −verdict (\(reasons.joined(separator: ", ")))"
-            }
-            let retry = attemptNumber > 1 ? " · retry \(attemptNumber)" : ""
-            track(kind: "review", label: "Auto · Review-req · #\(r.number) (@\(r.author))\(tag)\(retry)",
-                  prURL: r.url, result: result, source: "auto", auditAction: "review-req")
-            // Retries of the same review are re-dispatches, not new reviews handled —
-            // count each review once or the Settings tally overclaims.
-            if attemptNumber == 1 { reviewRequestsHandled += 1 }
-            return true
-        } catch {
-            AuditLog.log("auto", "spawn-failed",
-                         "Review-req #\(r.number) failed to spawn: \((error as? LocalizedError)?.errorDescription ?? "\(error)")")
-            refreshAudit()
-            return false
-        }
+        let job = AgentJob(kind: "review", auditAction: "review-req",
+                           label: "Review-req · #\(r.number) (@\(r.author))\(tag)",
+                           prompt: prompt, prURL: r.url, prNumber: r.number,
+                           authorLogin: r.author, duty: "review",
+                           workKey: AutofixMesh.workKey(kind: AutofixMesh.kindReviewReq,
+                                                        prURL: r.url, headSha: r.headSha),
+                           counter: .reviewRequests)
+        return await dispatchAgent(job, source: .auto, attemptNumber: attemptNumber).didSpawn
     }
 
     var reviewRequestsHandled: Int {
@@ -938,87 +1044,42 @@ final class Store: ObservableObject {
         }
     }
 
-    /// Spawn a Resolve-conflicts agent for one PR — shared by the conflicts reconciler
-    /// ("auto") and the panel's per-row button ("panel"). `resolvingPRs` is inserted
-    /// BEFORE the (seconds-long) spawn await, so a double-click or an overlapping poll
-    /// can't launch two agents on the same PR; the in-flight process check dedups
-    /// against agents that are already tracked. Returns whether an agent launched.
+    /// Resolve the conflicts on one PR — the job builder shared by the conflicts
+    /// reconciler (`.auto`) and the panel's per-row button (`.panel`). Everything
+    /// else (dedup, mesh policy, focus, label, counter) is the pipeline's.
     @discardableResult
     private func dispatchConflictFix(number: Int, url: String,
-                                     attemptNumber: Int = 1, source: String,
-                                     headSha: String = "") async -> Bool {
-        if resolvingPRs.contains(number) { return false }
-        if processes.contains(where: { $0.prURL == url && !$0.done }) { return false }
-        resolvingPRs.insert(number)
-        defer { resolvingPRs.remove(number) }
-        // A panel-button resolve is a deliberate user action — never mesh-gated.
-        if source == "auto", await meshMonitorStandsDown(
-            duty: "conflicts",
-            workKey: AutofixMesh.workKey(kind: AutofixMesh.kindConflicts,
-                                         prURL: url, headSha: headSha),
-            what: "Resolve #\(number)") { return false }
+                                     attemptNumber: Int = 1,
+                                     source: AgentDispatchGate.Source,
+                                     headSha: String = "") async -> DispatchOutcome {
         let prompt = ConflictConfig(target: .specific, me: effectiveMe,
                                     specificPR: String(number)).buildPrompt()
-        let preferred = terminal
-        // The monitor's "auto" spawns open in the background (keep the user's focus); a
-        // panel-button "panel" spawn is a deliberate user action, so it comes forward.
-        let restoreBID = source == "auto" ? frontmostAppBundleID : nil
-        do {
-            let result = try await Task.detached(priority: .userInitiated) {
-                try AgentSpawner.spawn(prompt, terminal: preferred, restoreFocusTo: restoreBID)
-            }.value
-            let retry = attemptNumber > 1 ? " · retry \(attemptNumber)" : ""
-            let label = source == "auto" ? "Auto · Resolve · #\(number)\(retry)" : "Resolve · #\(number)"
-            track(kind: "conflicts", label: label, prURL: url, result: result, source: source)
-            // Count only what the MONITOR handled — a manual panel resolve is not an
-            // auto-fixed conflict, and this feeds the pill's "fixed N".
-            if attemptNumber == 1 && source == "auto" { autofixConflictsHandled += 1 }
-            return true
-        } catch {
-            // Spawn failed (e.g. terminal-automation permission revoked). Audit it —
-            // this used to be completely silent — and let the reconciler retry with
-            // backoff.
-            AuditLog.log(source, "spawn-failed",
-                         "Resolve #\(number) failed to spawn: \((error as? LocalizedError)?.errorDescription ?? "\(error)")")
-            refreshAudit()
-            return false
-        }
+        let job = AgentJob(kind: "conflicts", auditAction: "conflicts",
+                           label: "Resolve · #\(number)",
+                           prompt: prompt, prURL: url, prNumber: number,
+                           authorLogin: nil, duty: "conflicts",
+                           workKey: AutofixMesh.workKey(kind: AutofixMesh.kindConflicts,
+                                                        prURL: url, headSha: headSha),
+                           counter: .conflicts)
+        return await dispatchAgent(job, source: source, attemptNumber: attemptNumber)
     }
 
-    /// Spawn the Deep, fix-on-branch review agent for one of MY PRs (reply "Fixed in
-    /// <hash>", don't mark ready, no formal review) and track it. Returns whether the spawn
-    /// succeeded — so the reconciler only starts its retry backoff once an agent actually
-    /// launched. `attemptNumber` ≥2 (a reconcile retry) is surfaced in the label/audit.
+    /// Reply-to-reviews on one of MY PRs (Deep, fix-on-branch, "Fixed in <hash>",
+    /// no formal review) — the my-reviews monitor's job builder. Returns whether an
+    /// agent launched, so the reconciler only starts its backoff on a real spawn.
     @discardableResult
     private func dispatchMyReview(_ s: PRSnapshot, attemptNumber: Int = 1) async -> Bool {
-        // Never pile a second agent on a PR that already has one running.
-        if processes.contains(where: { $0.prURL == s.url && !$0.done }) { return false }
-        if await meshMonitorStandsDown(
-            duty: "review",
-            workKey: AutofixMesh.workKey(kind: AutofixMesh.kindReviewReply,
-                                         prURL: s.url, headSha: s.headSha),
-            what: "Review #\(s.number)") { return false }
         let prompt = ReviewConfig(depth: "deep", target: .specific, me: effectiveMe,
                                   markReady: false, leaveReviews: false, replyToReviews: true,
                                   specificPR: String(s.number), specificAuthor: .mine).buildPrompt()
-        let preferred = terminal
-        // Auto-dispatch: open the terminal in the background, keeping the user's focus.
-        let restoreBID = frontmostAppBundleID
-        do {
-            let result = try await Task.detached(priority: .userInitiated) {
-                try AgentSpawner.spawn(prompt, terminal: preferred, restoreFocusTo: restoreBID)
-            }.value
-            let retry = attemptNumber > 1 ? " · retry \(attemptNumber)" : ""
-            track(kind: "review", label: "Auto · Review · #\(s.number)\(retry)",
-                  prURL: s.url, result: result, source: "auto", auditAction: "review-reply")
-            if attemptNumber == 1 { autofixReviewsHandled += 1 }
-            return true
-        } catch {
-            AuditLog.log("auto", "spawn-failed",
-                         "Review #\(s.number) failed to spawn: \((error as? LocalizedError)?.errorDescription ?? "\(error)")")
-            refreshAudit()
-            return false
-        }
+        let job = AgentJob(kind: "review", auditAction: "review-reply",
+                           label: "Review · #\(s.number)",
+                           prompt: prompt, prURL: s.url, prNumber: s.number,
+                           authorLogin: nil, duty: "review",
+                           workKey: AutofixMesh.workKey(kind: AutofixMesh.kindReviewReply,
+                                                        prURL: s.url, headSha: s.headSha),
+                           counter: .myReviews)
+        return await dispatchAgent(job, source: .auto, attemptNumber: attemptNumber).didSpawn
     }
 
     /// prNumber(String) -> our attempt record for reviews received on my own PRs (unresolved
@@ -1071,14 +1132,18 @@ final class Store: ObservableObject {
     }
 
     /// Dispatch a Resolve-conflicts agent for one PR (the blue button shown when a PR
-    /// conflicts) — the same single-PR conflict run the reconciler dispatches.
+    /// conflicts) — the very same job the reconciler dispatches, through the same
+    /// pipeline; only the trigger (a click) differs.
     func resolveConflicts(for number: Int) async {
         let (owner, repo) = coreRepo
         let url = "https://github.com/\(owner)/\(repo)/pull/\(number)"
-        if await dispatchConflictFix(number: number, url: url, source: "panel") == false,
-           !resolvingPRs.contains(number),
-           !processes.contains(where: { $0.prURL == url && !$0.done }) {
+        switch await dispatchConflictFix(number: number, url: url, source: .panel) {
+        case .failed:
             self.error = "Resolve #\(number) failed to spawn — see the activity log."
+        case .inFlight:
+            self.error = "Resolve #\(number): an agent is already on this PR."
+        case .spawned, .banned, .standDown:
+            break
         }
     }
 

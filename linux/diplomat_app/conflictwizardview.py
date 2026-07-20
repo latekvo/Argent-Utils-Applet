@@ -123,24 +123,37 @@ class ConflictWizardView(QWidget):
         self._sync()
 
     def _spawn(self) -> None:
-        from . import activity
+        from . import activity, autofix, widgets
 
         cfg = self._config()
         scope = cfg.specific_pr.strip() or "main"
+        label = f"Resolve conflicts · {scope}"
         if self.mesh_row.use_mesh():
             self.spawn_btn.setEnabled(False)
             self.status.setText("Dispatching over the mesh…")
-            activity.log("panel", "conflicts", f"Resolve conflicts · {scope} · via mesh")
+            activity.log("panel", "conflicts", f"{label} · via mesh")
             self.mesh_row.dispatch(cfg.build_prompt())
             return
+        # Local: the SAME pipeline the auto-monitor rides - dedup, registration -
+        # only the trigger (this click) and its policies differ
+        # (see autofix.dispatch_decide).
         term = review.resolved(self.store.terminal)
-        try:
-            review.spawn(cfg.build_prompt(), self.store.terminal)
-            self.status.setText(f"Launched {term.title}")
-            activity.log("panel", "conflicts", f"Resolve conflicts · {scope}")
-            self.store.refresh_activity()
-        except Exception as exc:  # noqa: BLE001
-            self.status.setText(f"Failed: {exc}")
+        number = cfg.pr_ref.number if cfg.target == Target.SPECIFIC else None
+        owner, repo = cfg.target_repo
+        url = f"https://github.com/{owner}/{repo}/pull/{number}" if number else None
+        verdict = self.store.dispatch_agent(
+            autofix.AgentJob(
+                kind="conflicts",
+                audit_action="conflicts",
+                label=label,
+                prompt=cfg.build_prompt(),
+                pr_url=url,
+                pr_number=number,
+                duty="conflicts",
+            ),
+            autofix.SOURCE_PANEL,
+        )
+        self.status.setText(widgets.dispatch_status_text(verdict, term.title))
 
     def _mesh_done(self, results: list, err: str) -> None:
         self.spawn_btn.setEnabled(True)

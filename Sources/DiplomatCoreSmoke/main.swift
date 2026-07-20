@@ -402,6 +402,39 @@ check(u.events.isEmpty && u.fingerprints[1]?.mergeable == "MERGEABLE", "UNKNOWN 
 print("autofix diff assertions passed")
 
 // ---- mesh coordination (work keys + assignment gate) ----
+section("unified dispatch gate")
+// The behavior matrix of the ONE pipeline both interfaces ride. PARITY: the
+// Python twin (autofix.dispatch_decide etc.) asserts these exact semantics —
+// and any new source asymmetry must be added HERE first, or it's a bug.
+for src in [AgentDispatchGate.Source.panel, .auto] {
+    check(AgentDispatchGate.decide(source: src, banned: true, agentOnPR: true,
+                                   meshStandsDown: true) == .banned,
+          "ban outranks everything for \(src.rawValue)")
+    check(AgentDispatchGate.decide(source: src, banned: false, agentOnPR: true,
+                                   meshStandsDown: true) == .inFlight,
+          "a live agent on the PR blocks \(src.rawValue) — never double-spawn")
+    check(AgentDispatchGate.decide(source: src, banned: false, agentOnPR: false,
+                                   meshStandsDown: false) == .proceed,
+          "clear board proceeds for \(src.rawValue)")
+}
+// The documented trigger asymmetries — and ONLY these:
+check(AgentDispatchGate.decide(source: .auto, banned: false, agentOnPR: false,
+                               meshStandsDown: true) == .standDown,
+      "mesh gates auto origination")
+check(AgentDispatchGate.decide(source: .panel, banned: false, agentOnPR: false,
+                               meshStandsDown: true) == .proceed,
+      "a human's click already decided placement — panel is never mesh-gated")
+check(AgentDispatchGate.stealsFocus(.panel) && !AgentDispatchGate.stealsFocus(.auto),
+      "panel comes forward, auto never steals focus")
+check(AgentDispatchGate.label(source: .auto, core: "Review · #7", attemptNumber: 2)
+      == "Auto · Review · #7 · retry 2", "auto label prefix + retry suffix")
+check(AgentDispatchGate.label(source: .panel, core: "Review · #7") == "Review · #7",
+      "panel label is the bare core")
+check(AgentDispatchGate.bumpsCounter(source: .auto, attemptNumber: 1)
+      && !AgentDispatchGate.bumpsCounter(source: .auto, attemptNumber: 2)
+      && !AgentDispatchGate.bumpsCounter(source: .panel, attemptNumber: 1),
+      "only a monitor's first dispatch counts as auto-handled")
+
 section("autofix mesh coordination")
 // PARITY fixtures: linux/tests/test_autofix.py asserts these exact strings — two
 // nodes only dedupe origination when their derivations agree byte-for-byte

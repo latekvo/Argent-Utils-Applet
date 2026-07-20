@@ -516,3 +516,81 @@ def test_in_flight_falls_back_to_live_ps_agents(store, monkeypatch):
     monkeypatch.setattr(Store, "_live_pr_agents", lambda self: set())
     store._poll_my_prs("o", "r")
     assert len(calls) == 1
+
+
+# MARK: - unified dispatch pipeline (buttons and monitors are triggers, not paths)
+
+
+def test_dispatch_gate_matrix_parity():
+    """The behavior matrix of the ONE pipeline both interfaces ride - PARITY with
+    the Swift smoke's AgentDispatchGate assertions: any new source asymmetry must
+    be added there AND here first, or it's a bug."""
+    for src in (autofix.SOURCE_PANEL, autofix.SOURCE_AUTO):
+        assert autofix.dispatch_decide(src, True, True, True) == autofix.VERDICT_BANNED
+        assert autofix.dispatch_decide(src, False, True, True) == autofix.VERDICT_IN_FLIGHT
+        assert autofix.dispatch_decide(src, False, False, False) == autofix.VERDICT_PROCEED
+    # The documented trigger asymmetries - and ONLY these:
+    assert (
+        autofix.dispatch_decide(autofix.SOURCE_AUTO, False, False, True)
+        == autofix.VERDICT_STAND_DOWN
+    )
+    assert (
+        autofix.dispatch_decide(autofix.SOURCE_PANEL, False, False, True)
+        == autofix.VERDICT_PROCEED
+    )  # a human's click already decided placement
+    assert (
+        autofix.dispatch_label(autofix.SOURCE_AUTO, "Review · #7", 2)
+        == "Auto · Review · #7 · retry 2"
+    )
+    assert autofix.dispatch_label(autofix.SOURCE_PANEL, "Review · #7") == "Review · #7"
+    assert autofix.dispatch_bumps_counter(autofix.SOURCE_AUTO, 1)
+    assert not autofix.dispatch_bumps_counter(autofix.SOURCE_AUTO, 2)
+    assert not autofix.dispatch_bumps_counter(autofix.SOURCE_PANEL, 1)
+
+
+def _job(number=9, author=None):
+    return autofix.AgentJob(
+        kind="review",
+        audit_action="review",
+        label=f"Review · #{number}",
+        prompt="PROMPT",
+        pr_url=f"https://github.com/o/r/pull/{number}",
+        pr_number=number,
+        author_login=author,
+        duty="review",
+    )
+
+
+def test_panel_and_auto_dedup_against_each_other(store, monkeypatch):
+    """A manual spawn registers exactly like an auto one, so EITHER interface
+    refuses while the other's agent is on the PR - the 2026-07-20 class of dupes
+    can't cross the interface boundary."""
+    calls = _spawn_recorder(monkeypatch, finish=False)
+    monkeypatch.setattr("diplomat_app.bans.read", lambda: [])
+    assert store.dispatch_agent(_job(), autofix.SOURCE_PANEL) == "spawned"
+    assert len(calls) == 1
+    # The monitor now sees the manual agent as in-flight...
+    assert store.dispatch_agent(_job(), autofix.SOURCE_AUTO) == autofix.VERDICT_IN_FLIGHT
+    # ...and a second click is refused the same way.
+    assert store.dispatch_agent(_job(), autofix.SOURCE_PANEL) == autofix.VERDICT_IN_FLIGHT
+    assert len(calls) == 1
+
+
+def test_banned_author_blocks_both_interfaces(store, monkeypatch):
+    calls = _spawn_recorder(monkeypatch)
+    monkeypatch.setattr("diplomat_app.bans.read", lambda: ["evil"])
+    monkeypatch.setattr("diplomat_app.bans.is_banned", lambda login, b: login in b)
+    for src in (autofix.SOURCE_PANEL, autofix.SOURCE_AUTO):
+        assert store.dispatch_agent(_job(author="evil"), src) == autofix.VERDICT_BANNED
+    assert calls == []
+
+
+def test_mesh_gates_only_auto_origination(store, monkeypatch):
+    _mesh_store(monkeypatch, store, {"review": {"assigned": ["peer-node"]}})
+    calls = _spawn_recorder(monkeypatch)
+    monkeypatch.setattr("diplomat_app.bans.read", lambda: [])
+    assert store.dispatch_agent(_job(number=11), autofix.SOURCE_AUTO) == autofix.VERDICT_STAND_DOWN
+    assert calls == []
+    # The click runs locally regardless - the human already decided placement.
+    assert store.dispatch_agent(_job(number=11), autofix.SOURCE_PANEL) == "spawned"
+    assert len(calls) == 1

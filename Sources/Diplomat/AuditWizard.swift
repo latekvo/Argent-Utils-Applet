@@ -165,21 +165,19 @@ struct AuditWizardView: View {
             }
             return
         }
-        let preferred = store.terminal
-        let term = AgentSpawner.resolved(preferred)
-        let label = trackingLabel
+        // Local: the SAME pipeline the auto-monitor rides — only the trigger (this
+        // click) and its policies (foreground, no mesh gate) differ. Audits aren't
+        // PR-scoped, so there is no dedup key. See `AgentDispatchGate`.
+        let term = AgentSpawner.resolved(store.terminal)
+        let job = Store.AgentJob(kind: "audit", auditAction: "audit",
+                                 label: trackingLabel, prompt: cfg.buildPrompt(),
+                                 prURL: nil, prNumber: nil,
+                                 authorLogin: nil, duty: "audit",
+                                 workKey: "", counter: nil)
         status = "Launching \(term.title)…"
-        Task.detached {
-            do {
-                let result = try AgentSpawner.spawn(cfg.buildPrompt(), terminal: preferred)
-                await MainActor.run {
-                    store.track(kind: "audit", label: label, prURL: nil, result: result)
-                    status = "Launched \(term.title) · \(Fmt.clock(Date()))"
-                }
-            } catch {
-                let msg = (error as? LocalizedError)?.errorDescription ?? "\(error)"
-                await MainActor.run { status = "Failed: \(msg)" }
-            }
+        Task {
+            status = statusText(for: await store.dispatchAgent(job, source: .panel),
+                                terminal: term.title)
         }
     }
 }

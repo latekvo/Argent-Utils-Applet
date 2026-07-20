@@ -172,6 +172,10 @@ class Store(QObject):
         # Brief cache over the `ps` live-agent scan (autofix.live_pr_numbers) so one
         # poll cycle costs one subprocess: (at, pr numbers).
         self._live_agents_cache: tuple[float, set[int]] | None = None
+        # PR numbers with a dispatch_agent call in flight (held for the whole call,
+        # under _autofix_lock) - a click and an overlapping poll can't race two
+        # spawns onto one PR.
+        self._dispatching_prs: set[int] = set()
         # Mesh coordination for the monitor (docs/szpontnet/12): per-duty stand-down
         # state (True while the duty is assigned to other nodes — logged only on
         # transition) and the work keys whose claim suppression was already logged.
@@ -673,101 +677,163 @@ class Store(QObject):
                 names[p["id"]] = p.get("name") or p["id"][:8]
         return [names.get(i, i[:8]) for i in ids]
 
+    # MARK: - the one dispatch pipeline (buttons and monitors are triggers, not paths)
+
+    def dispatch_agent(self, job: autofix.AgentJob, source: str, attempt: int = 1) -> str:
+        """Run one agent job through the shared gate (``autofix.dispatch_decide`` -
+        the pure, tested decision both platforms mirror) and, on proceed, spawn and
+        register it. Returns the verdict: ``"spawned"``, an ``autofix.VERDICT_*``
+        refusal, or ``"failed"`` (spawn error). Twin of Store.dispatchAgent (macOS).
+
+        In-flight evidence is the tracked list OR a live ``claude`` visible in
+        ``ps`` - the ground-truth floor that also catches agents whose local
+        bookkeeping was lost (applet restart) and mesh jobs that landed on this
+        very machine. ``_dispatching_prs`` is held for the whole call so an
+        overlapping poll and a click can't race two spawns onto one PR."""
+        if job.pr_number is not None:
+            with self._autofix_lock:
+                if job.pr_number in self._dispatching_prs:
+                    return autofix.VERDICT_IN_FLIGHT
+                self._dispatching_prs.add(job.pr_number)
+        try:
+            banned = bool(job.author_login) and bans.is_banned(
+                job.author_login, bans.read()
+            )
+            agent_on_pr = bool(job.pr_url) and self._in_flight(job.pr_url)
+            # Mesh last, and only when the job would otherwise run: a claim has
+            # gossip side effects. Only auto origination is gated - a human
+            # clicking THIS machine's button has already decided placement.
+            stands_down = (
+                not banned
+                and not agent_on_pr
+                and source == autofix.SOURCE_AUTO
+                and self._mesh_monitor_gate(job.duty, job.work_key, job.label)
+            )
+            verdict = autofix.dispatch_decide(source, banned, agent_on_pr, stands_down)
+            if verdict == autofix.VERDICT_BANNED:
+                activity.log(
+                    source, "ban-skip", f"{job.label} - author is banned (un-ban to review)"
+                )
+                self.refresh_activity()
+                return verdict
+            if verdict == autofix.VERDICT_IN_FLIGHT:
+                # A monitor tick hitting a busy PR is routine (stays silent); a
+                # click deserves an answer for why nothing opened.
+                if source == autofix.SOURCE_PANEL:
+                    activity.log(
+                        "panel", "in-flight", f"{job.label} - an agent is already on this PR"
+                    )
+                    self.refresh_activity()
+                return verdict
+            if verdict == autofix.VERDICT_STAND_DOWN:
+                return verdict  # logged (once per transition/key) by the gate
+            if job.pr_url is not None and job.pr_number is not None:
+                ok = self._spawn_tracked(job.prompt, job.pr_url, job.pr_number)
+            else:
+                # Not PR-scoped (sweeps, audits): nothing to dedup against, so no
+                # registration - but the same spawn, label and audit shape.
+                try:
+                    review.spawn(job.prompt, self.terminal)
+                    ok = True
+                except review.SpawnError:
+                    ok = False
+            if not ok:
+                activity.log(source, "spawn-failed", f"{job.label} failed to spawn")
+                self.refresh_activity()
+                return "failed"
+            activity.log(
+                source, job.audit_action, autofix.dispatch_label(source, job.label, attempt)
+            )
+            # Retries are re-dispatches, not new work handled - count once, and
+            # only for the monitor (a manual run is the user's own action).
+            if autofix.dispatch_bumps_counter(source, attempt):
+                if job.counter == "review_requests":
+                    self.review_requests_handled += 1
+                elif job.counter == "my_reviews":
+                    self.autofix_reviews_handled += 1
+                elif job.counter == "conflicts":
+                    self.autofix_conflicts_handled += 1
+            if source == autofix.SOURCE_PANEL:
+                self.refresh_activity()
+            return "spawned"
+        finally:
+            if job.pr_number is not None:
+                with self._autofix_lock:
+                    self._dispatching_prs.discard(job.pr_number)
+
     def _dispatch_conflict_fix(
         self, number: int, url: str, attempt: int, source: str, head_sha: str = ""
     ) -> bool:
-        if self._in_flight(url):
-            return False
-        if source == "auto" and self._mesh_monitor_gate(
-            "conflicts",
-            autofix.work_key(autofix.WORK_CONFLICTS, url, head_sha),
-            f"Resolve #{number}",
-        ):
-            return False
-        prompt = conflicts.ConflictConfig(
-            target=PRTarget.SPECIFIC, me=self.effective_me, specific_pr=str(number)
-        ).build_prompt()
-        if not self._spawn_tracked(prompt, url, number):
-            activity.log(source, "spawn-failed", f"Resolve #{number} failed to spawn")
-            return False
-        retry = f" · retry {attempt}" if attempt > 1 else ""
-        label = (
-            f"Auto · Resolve · #{number}{retry}"
-            if source == "auto"
-            else f"Resolve · #{number}"
+        job = autofix.AgentJob(
+            kind="conflicts",
+            audit_action="conflicts",
+            label=f"Resolve · #{number}",
+            prompt=conflicts.ConflictConfig(
+                target=PRTarget.SPECIFIC, me=self.effective_me, specific_pr=str(number)
+            ).build_prompt(),
+            pr_url=url,
+            pr_number=number,
+            duty="conflicts",
+            work_key=autofix.work_key(autofix.WORK_CONFLICTS, url, head_sha),
+            counter="conflicts",
         )
-        activity.log(source, "conflicts", label)
-        # Count only what the monitor auto-fixed (a manual panel resolve isn't one).
-        if attempt == 1 and source == "auto":
-            self.autofix_conflicts_handled += 1
-        return True
+        return self.dispatch_agent(job, source, attempt) == "spawned"
 
     def _dispatch_my_review(self, s, attempt: int = 1) -> bool:
-        if self._in_flight(s.url):
-            return False
-        if self._mesh_monitor_gate(
-            "review",
-            autofix.work_key(autofix.WORK_REVIEW_REPLY, s.url, s.head_sha),
-            f"Review #{s.number}",
-        ):
-            return False
-        prompt = review.ReviewConfig(
-            depth="deep",
-            target=PRTarget.SPECIFIC,
-            me=self.effective_me,
-            mark_ready=False,
-            leave_reviews=False,
-            reply_to_reviews=True,
-            specific_pr=str(s.number),
-            specific_author=review.SpecificAuthor.MINE,
-        ).build_prompt()
-        if not self._spawn_tracked(prompt, s.url, s.number):
-            activity.log("auto", "spawn-failed", f"Review #{s.number} failed to spawn")
-            return False
-        retry = f" · retry {attempt}" if attempt > 1 else ""
-        activity.log("auto", "review-reply", f"Auto · Review · #{s.number}{retry}")
-        if attempt == 1:
-            self.autofix_reviews_handled += 1
-        return True
+        job = autofix.AgentJob(
+            kind="review",
+            audit_action="review-reply",
+            label=f"Review · #{s.number}",
+            prompt=review.ReviewConfig(
+                depth="deep",
+                target=PRTarget.SPECIFIC,
+                me=self.effective_me,
+                mark_ready=False,
+                leave_reviews=False,
+                reply_to_reviews=True,
+                specific_pr=str(s.number),
+                specific_author=review.SpecificAuthor.MINE,
+            ).build_prompt(),
+            pr_url=s.url,
+            pr_number=s.number,
+            duty="review",
+            work_key=autofix.work_key(autofix.WORK_REVIEW_REPLY, s.url, s.head_sha),
+            counter="my_reviews",
+        )
+        return self.dispatch_agent(job, autofix.SOURCE_AUTO, attempt) == "spawned"
 
     def _dispatch_review_request(self, r, attempt: int = 1) -> bool:
-        if self._in_flight(r.url):
-            return False
-        if self._mesh_monitor_gate(
-            "review",
-            autofix.work_key(autofix.WORK_REVIEW_REQ, r.url, r.head_sha),
-            f"Review-req #{r.number}",
-        ):
-            return False
         reasons = self.verdict_policy.withhold_reasons(r.files, r.author_association)
         verdict = self.auto_approve_enabled and not reasons
-        prompt = review.ReviewConfig(
-            depth="max",
-            target=PRTarget.SPECIFIC,
-            me=self.effective_me,
-            mark_ready=False,
-            leave_reviews=True,
-            reply_to_reviews=False,
-            specific_pr=str(r.number),
-            final_pass=verdict,
-            specific_author=review.SpecificAuthor.THEIRS,
-        ).build_prompt()
-        if not self._spawn_tracked(prompt, r.url, r.number):
-            activity.log("auto", "spawn-failed", f"Review-req #{r.number} failed to spawn")
-            return False
         if verdict:
             tag = " +verdict"
         elif not self.auto_approve_enabled:
             tag = " -verdict (auto-approvals off)"
         else:
             tag = f" -verdict ({', '.join(reasons)})"
-        retry = f" · retry {attempt}" if attempt > 1 else ""
-        activity.log(
-            "auto", "review-req", f"Auto · Review-req · #{r.number} (@{r.author}){tag}{retry}"
+        job = autofix.AgentJob(
+            kind="review",
+            audit_action="review-req",
+            label=f"Review-req · #{r.number} (@{r.author}){tag}",
+            prompt=review.ReviewConfig(
+                depth="max",
+                target=PRTarget.SPECIFIC,
+                me=self.effective_me,
+                mark_ready=False,
+                leave_reviews=True,
+                reply_to_reviews=False,
+                specific_pr=str(r.number),
+                final_pass=verdict,
+                specific_author=review.SpecificAuthor.THEIRS,
+            ).build_prompt(),
+            pr_url=r.url,
+            pr_number=r.number,
+            author_login=r.author,
+            duty="review",
+            work_key=autofix.work_key(autofix.WORK_REVIEW_REQ, r.url, r.head_sha),
+            counter="review_requests",
         )
-        if attempt == 1:
-            self.review_requests_handled += 1
-        return True
+        return self.dispatch_agent(job, autofix.SOURCE_AUTO, attempt) == "spawned"
 
     def _spawn_tracked(self, prompt: str, url: str, number: int) -> bool:
         """Spawn an agent with a completion sentinel and record it in-flight. Returns
