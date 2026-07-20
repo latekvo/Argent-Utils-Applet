@@ -34,7 +34,7 @@ may place work differently ([09](09-extensibility.md#vocabulary-skew)).
 | down-peer retention | `300` s (reference) | [snapshot retention](08-state.md#down-peer-retention) |
 
 > Timing values are the reference defaults. An implementation MAY expose overrides
-> for testing (the reference reads `ARGENT_MESH_*` env vars to run fast-timed
+> for testing (the reference reads `DIPLOMAT_MESH_*` env vars to run fast-timed
 > meshes on loopback), but nodes on the *same* mesh must use compatible values -
 > in particular `peerTimeoutSecs` must exceed `heartbeatIntervalSecs` with margin,
 > and `peerStaleSecs` must sit between them.
@@ -115,8 +115,8 @@ empty (keyless). See [11 - authenticated gossip](11-trust-and-balancing.md#authe
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
-| server mode via | `ARGENT_MESH_SERVER=1` | node accepts work but never dispatches to peers ([11](11-trust-and-balancing.md#the-server-role)). |
-| API key via | `ARGENT_MESH_API_KEY` | required `apiKey` on inbound `ctl`/`dispatch` ([11](11-trust-and-balancing.md#the-api-key)); empty = no gate. |
+| server mode via | `DIPLOMAT_MESH_SERVER=1` | node accepts work but never dispatches to peers ([11](11-trust-and-balancing.md#the-server-role)). |
+| API key via | `DIPLOMAT_MESH_API_KEY` | required `apiKey` on inbound `ctl`/`dispatch` ([11](11-trust-and-balancing.md#the-api-key)); empty = no gate. |
 
 The `apiKey` field is optional and additive (omitted when empty), and is
 orthogonal to the join `secret` and to device trust.
@@ -185,8 +185,8 @@ a node that omits them drops the `work-claim` message and keeps the link.
 | Constant | Value | Meaning |
 |----------|-------|---------|
 | job-result signing tag | `szpontnet-jobresult-v1:` | domain tag for a `job-result` `sig` ([13](13-foreign-execution.md#correlation-and-authenticity)). |
-| confinement runner via | `ARGENT_MESH_FOREIGN_SPAWN` | operator's sandbox command (`{prompt_file}`/`{result_file}`); its presence enables confined foreign execution, absence = decline ([13](13-foreign-execution.md#confinement-the-executors-responsibility)). |
-| result handler via | `ARGENT_MESH_ON_RESULT` | originator's own-identity action on a returned result (`{result_file}`); where e.g. `gh` runs. |
+| confinement runner via | `DIPLOMAT_MESH_FOREIGN_SPAWN` | operator's sandbox command (`{prompt_file}`/`{result_file}`); its presence enables confined foreign execution, absence = decline ([13](13-foreign-execution.md#confinement-the-executors-responsibility)). |
+| result handler via | `DIPLOMAT_MESH_ON_RESULT` | originator's own-identity action on a returned result (`{result_file}`); where e.g. `gh` runs. |
 | `foreignResultRetryIntervalSecs` | `5.0` | executor re-sends an unacked `job-result` this often. |
 | `foreignResultMaxSecs` | `120.0` | executor gives up delivering after this (originator presumed gone). |
 | `foreignJobTimeoutSecs` | `900.0` | confined compute budget before the executor returns an `ok:false` result. |
@@ -201,7 +201,7 @@ and declines foreign requests.
 |----------|-------|---------|
 | `foreignCompletionDeadlineSecs` | `21600.0` (6 h) | how long a **foreign** executor that replied `spawned` (without `direct: true`) has to deliver its `job-result` before the originator sends a [`job-reminder`](04-messages.md#job-reminder). A **floor** - the originator must not remind earlier; an approved extension re-arms the full window. |
 | `foreignReminderGraceSecs` | `900.0` | how long the executor has to answer the reminder (result / [`job-progress`](04-messages.md#job-progress)) before the originator **bans** it. |
-| extension decider via | `ARGENT_MESH_EXTEND_DECIDER` | the originator's command template (`{job_file}`) that judges a late executor's `job-progress` plea - exit `0` extends, anything else bans. **Unset = no extensions** ([13](13-foreign-execution.md#the-extension-decision)). |
+| extension decider via | `DIPLOMAT_MESH_EXTEND_DECIDER` | the originator's command template (`{job_file}`) that judges a late executor's `job-progress` plea - exit `0` extends, anything else bans. **Unset = no extensions** ([13](13-foreign-execution.md#the-extension-decision)). |
 | `job-status.direct` | `true` \| absent | additive flag on a `spawned` [`job-status`](04-messages.md#job-status): the executor ran the job on the personal path, no result will follow, no deadline is armed. |
 | `job-progress.note` cap | `4096` bytes | receiver-side truncation of the progress note. |
 | ban list | `~/.argent/mesh/banned.json` | machine-local, never gossiped ([08](08-state.md#bannedjson)); edited by the automatic ban and the [`ban`/`unban`](04-messages.md#ban--unban) control commands. |
@@ -240,6 +240,6 @@ answering reminders.
 | `~/.argent/mesh/banned.json` | local ban list (never gossiped, [08](08-state.md#bannedjson)) |
 | `~/.argent/mesh/stats.json` | local load-balancing accounting (never gossiped, [08](08-state.md#statsjson)) |
 | `~/.argent/mesh/state.json` | public topology snapshot ([08](08-state.md#the-statejson-snapshot)) |
-| overridable via | `ARGENT_MESH_DIR` |
-| join secret via | `ARGENT_MESH_SECRET` ([03](03-transport.md#the-join-fence)) |
-| server mode / API key via | `ARGENT_MESH_SERVER` / `ARGENT_MESH_API_KEY` ([11](11-trust-and-balancing.md#server-nodes--api-key-authentication)) |
+| overridable via | `DIPLOMAT_MESH_DIR` |
+| join secret via | `DIPLOMAT_MESH_SECRET` ([03](03-transport.md#the-join-fence)) |
+| server mode / API key via | `DIPLOMAT_MESH_SERVER` / `DIPLOMAT_MESH_API_KEY` ([11](11-trust-and-balancing.md#server-nodes--api-key-authentication)) |

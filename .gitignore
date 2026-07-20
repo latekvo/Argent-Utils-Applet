@@ -3,7 +3,7 @@
 *.xcodeproj
 .swiftpm/
 DerivedData/
-ArgentUtils.app/
+Diplomat.app/
 
 # Python (Linux applet)
 __pycache__/

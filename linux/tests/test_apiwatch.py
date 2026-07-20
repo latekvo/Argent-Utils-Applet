@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from argent_utils import apiwatch, tmuxwatch
+from diplomat_app import apiwatch, tmuxwatch
 
 
 # MARK: - looks_like_api_error
@@ -132,7 +132,7 @@ def test_dump_panes_empty_when_tmux_absent(monkeypatch):
 
 @pytest.fixture
 def store():
-    from argent_utils.store import Store
+    from diplomat_app.store import Store
 
     return Store()
 

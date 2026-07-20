@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Build the argent-core CLI (the Swift prompt engine the applet shells out to)
-# and install it to ~/.local/share/argent-utils/argent-core.
+# Build the diplomat-core CLI (the Swift prompt engine the applet shells out to)
+# and install it to ~/.local/share/diplomat/diplomat-core.
 #
-# argent-core is a statically-linked, self-contained binary (Swift stdlib + core
+# diplomat-core is a statically-linked, self-contained binary (Swift stdlib + core
 # baked in): its only non-glibc deps are libstdc++/libgcc_s, so it runs on any
 # glibc Linux without a Swift toolchain present. Building it, however, needs a
 # Swift toolchain (https://swift.org/install — swiftly is the easy path).
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-DEST_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/argent-utils"
-DEST="$DEST_DIR/argent-core"
+DEST_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/diplomat"
+DEST="$DEST_DIR/diplomat-core"
 
 # Local library shims first, when present (unsupported-distro setups — e.g.
 # Arch, whose ncurses/libxml2 sonames differ from what the toolchain links —
@@ -32,11 +32,11 @@ if ! command -v swift >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "Building argent-core (static) with $(swift --version 2>/dev/null | head -1)…"
+echo "Building diplomat-core (static) with $(swift --version 2>/dev/null | head -1)…"
 cd "$REPO_ROOT"
-swift build --product argent-core --static-swift-stdlib -c release
+swift build --product diplomat-core --static-swift-stdlib -c release
 
-BIN="$(swift build --product argent-core -c release --show-bin-path)/argent-core"
+BIN="$(swift build --product diplomat-core -c release --show-bin-path)/diplomat-core"
 mkdir -p "$DEST_DIR"
 install -m 0755 "$BIN" "$DEST"
 echo "Installed: $DEST"

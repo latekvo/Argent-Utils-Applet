@@ -1,4 +1,4 @@
-# Argent Utils — Linux applet (Qt6 / PySide6)
+# Diplomat — Linux applet (Qt6 / PySide6)
 
 The Linux port of the macOS menu-bar wrench: a **system-tray applet** with the
 same dense panel of six `software-mansion/argent` triage tools, reverse lookup,
@@ -30,10 +30,10 @@ XEmbed): works on **XFCE** (Notification Area / Status Notifier panel plugin),
 ```bash
 cd linux
 pip install -r requirements.txt
-./argent-utils                 # tray applet (left-click the wrench)
+./diplomat                 # tray applet (left-click the wrench)
 ```
 
-Quit from the panel's ⏻ button, the tray right-click menu, or `pkill -f "python -m argent_utils"`.
+Quit from the panel's ⏻ button, the tray right-click menu, or `pkill -f "python -m diplomat_app"`.
 
 ## Autostart on login
 
@@ -42,12 +42,12 @@ Quit from the panel's ⏻ button, the tray right-click menu, or `pkill -f "pytho
 ./scripts/uninstall-autostart.sh  # removes it and stops the app
 ```
 
-Installs `~/.config/autostart/argent-utils.desktop` so the wrench reappears every
+Installs `~/.config/autostart/diplomat.desktop` so the wrench reappears every
 login (the cross-desktop analogue of the macOS LaunchAgent).
 
 ## Settings
 
-Persist via `QSettings` (`~/.config/argent-utils/…`):
+Persist via `QSettings` (`~/.config/diplomat/…`):
 
 - **GitHub username** — overrides the `gh`-authenticated login for the "My …" tools.
 - **Tools — colour & visibility** — retint or hide any tool card.
@@ -55,38 +55,38 @@ Persist via `QSettings` (`~/.config/argent-utils/…`):
   MCP server (drives the Node installer in `../device-allocator/`), with status.
 - **Spawn terminal** — which terminal SPAWN AGENT opens.
 - **Update** — fast-forward this checkout to the latest GitHub commit, rebuild
-  the `argent-core` binary, and relaunch the tray app in place (the fresh
+  the `diplomat-core` binary, and relaunch the tray app in place (the fresh
   instance replaces the running one, newest-wins).
 
-Override the agent's working directory with `ARGENT_UTILS_REPO` (default `~/dev/argent`).
+Override the agent's working directory with `DIPLOMAT_REPO` (default `~/dev/argent`).
 
-## Argent Mesh (experimental)
+## Diplomat Mesh (experimental)
 
 The applet can coordinate duties with the other machines on your LAN — see the
-[root README's Mesh section](../README.md#argent-mesh-experimental--lan-p2p-duty-coordination)
+[root README's Mesh section](../README.md#diplomat-mesh-experimental--lan-p2p-duty-coordination)
 for the model. Enable it in ⚙ Settings; the panel then grows a collapsible
 topology column (live nodes, link states, per-node tier/token editors, per-duty
 strategy controls). The node itself is stdlib-only and runs headless anywhere:
 
 ```bash
-python3 -m argent_utils.mesh --daemon     # join the mesh (works on macOS too, no Qt)
-python3 -m argent_utils.mesh --status     # topology + duty assignments
-python3 -m argent_utils.mesh --set tokens=out tier=2
-python3 -m argent_utils.mesh --dispatch audit --prompt "…"
+python3 -m diplomat_app.mesh --daemon     # join the mesh (works on macOS too, no Qt)
+python3 -m diplomat_app.mesh --status     # topology + duty assignments
+python3 -m diplomat_app.mesh --set tokens=out tier=2
+python3 -m diplomat_app.mesh --dispatch audit --prompt "…"
 ```
 
 ## Headless self-tests (no display needed)
 
 ```bash
-ARGENT_UTILS_DUMP=1        python -m argent_utils   # real fetch+filter, prints all 6 tools
-ARGENT_UTILS_LOOKUP=337    python -m argent_utils   # reverse-lookup one number
-ARGENT_UTILS_PRINT_PROMPT=mine python -m argent_utils  # assemble a Review prompt (mine|user|single)
+DIPLOMAT_DUMP=1        python -m diplomat_app   # real fetch+filter, prints all 6 tools
+DIPLOMAT_LOOKUP=337    python -m diplomat_app   # reverse-lookup one number
+DIPLOMAT_PRINT_PROMPT=mine python -m diplomat_app  # assemble a Review prompt (mine|user|single)
                                                        #   conflicts-mine|conflicts-user|conflicts-single → Resolve-conflicts prompt
 
 # Snapshot a panel state to PNG (no real display required):
-ARGENT_UTILS_RENDER=panel ARGENT_UTILS_RENDER_OUT=/tmp/p.png \
-    QT_QPA_PLATFORM=offscreen python -m argent_utils   # panel|lookup|wizard|conflicts|settings|devices|mesh
-ARGENT_UTILS_REFRESH_SECS=30 ./argent-utils            # faster auto-refresh, for tuning
+DIPLOMAT_RENDER=panel DIPLOMAT_RENDER_OUT=/tmp/p.png \
+    QT_QPA_PLATFORM=offscreen python -m diplomat_app   # panel|lookup|wizard|conflicts|settings|devices|mesh
+DIPLOMAT_REFRESH_SECS=30 ./diplomat            # faster auto-refresh, for tuning
 ```
 
 ## Tests
@@ -115,7 +115,7 @@ python tests/test_logic.py        # the logic tests, dependency-free (no pytest)
 ## Layout
 
 ```
-linux/argent_utils/
+linux/diplomat_app/
   core.py         loads the shared core/ assets
   gh.py           gh CLI shell-out (GraphQL)
   models.py       domain models, Filters, Fmt, API (from core/)
@@ -126,7 +126,7 @@ linux/argent_utils/
   conflicts.py    ConflictConfig + prompt builder (from core/)
   audit.py        AuditConfig + prompt builder - the Full E2E test (from core/)
   deviceallocator.py  bridge to the allocator daemon's state.json + Node installer
-  mesh/           Argent Mesh node (stdlib-only): identity, protocol, assign,
+  mesh/           Diplomat Mesh node (stdlib-only): identity, protocol, assign,
                   node (asyncio), ctl client, spawnjob, statefile, __main__ CLI
   widgets.py      cards, chips, rows
   panel.py        the popup panel (header, search, grid, results, devices)

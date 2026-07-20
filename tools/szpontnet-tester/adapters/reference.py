@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Candidate adapter for the reference node (``linux/argent_utils/mesh``).
+"""Candidate adapter for the reference node (``linux/diplomat_app/mesh``).
 
 The conformance tester launches a candidate purely through the ``SZPONTNET_*``
 environment (the *candidate contract*). The reference node predates that contract
-and reads its own ``ARGENT_MESH_*`` variables + a ``node.json`` identity file, so
+and reads its own ``DIPLOMAT_MESH_*`` variables + a ``node.json`` identity file, so
 this thin adapter translates one into the other and then execs the real node. It
 is the worked example every other implementation copies: read ``SZPONTNET_*``,
 configure your node, run it.
@@ -24,40 +24,40 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 LINUX = REPO / "linux"
 
-# SZPONTNET_* → ARGENT_MESH_* protocol/discovery knobs (names differ, values 1:1).
+# SZPONTNET_* → DIPLOMAT_MESH_* protocol/discovery knobs (names differ, values 1:1).
 _MAP = {
-    "SZPONTNET_LOOPBACK": "ARGENT_MESH_LOOPBACK",
-    "SZPONTNET_MCAST_GROUP": "ARGENT_MESH_MCAST_GROUP",
-    "SZPONTNET_MCAST_PORT": "ARGENT_MESH_MCAST_PORT",
-    "SZPONTNET_TCP_BASE": "ARGENT_MESH_TCP_BASE",
-    "SZPONTNET_TCP_SPAN": "ARGENT_MESH_TCP_SPAN",
-    "SZPONTNET_BEACON_SECS": "ARGENT_MESH_BEACON_SECS",
-    "SZPONTNET_HEARTBEAT_SECS": "ARGENT_MESH_HEARTBEAT_SECS",
-    "SZPONTNET_STALE_SECS": "ARGENT_MESH_STALE_SECS",
-    "SZPONTNET_TIMEOUT_SECS": "ARGENT_MESH_TIMEOUT_SECS",
-    "SZPONTNET_ACK_SECS": "ARGENT_MESH_ACK_SECS",
-    "SZPONTNET_STATE_SECS": "ARGENT_MESH_STATE_SECS",
-    "SZPONTNET_SECRET": "ARGENT_MESH_SECRET",
-    "SZPONTNET_PLATFORM": "ARGENT_MESH_PLATFORM",
-    "SZPONTNET_SPAWN": "ARGENT_MESH_SPAWN",
+    "SZPONTNET_LOOPBACK": "DIPLOMAT_MESH_LOOPBACK",
+    "SZPONTNET_MCAST_GROUP": "DIPLOMAT_MESH_MCAST_GROUP",
+    "SZPONTNET_MCAST_PORT": "DIPLOMAT_MESH_MCAST_PORT",
+    "SZPONTNET_TCP_BASE": "DIPLOMAT_MESH_TCP_BASE",
+    "SZPONTNET_TCP_SPAN": "DIPLOMAT_MESH_TCP_SPAN",
+    "SZPONTNET_BEACON_SECS": "DIPLOMAT_MESH_BEACON_SECS",
+    "SZPONTNET_HEARTBEAT_SECS": "DIPLOMAT_MESH_HEARTBEAT_SECS",
+    "SZPONTNET_STALE_SECS": "DIPLOMAT_MESH_STALE_SECS",
+    "SZPONTNET_TIMEOUT_SECS": "DIPLOMAT_MESH_TIMEOUT_SECS",
+    "SZPONTNET_ACK_SECS": "DIPLOMAT_MESH_ACK_SECS",
+    "SZPONTNET_STATE_SECS": "DIPLOMAT_MESH_STATE_SECS",
+    "SZPONTNET_SECRET": "DIPLOMAT_MESH_SECRET",
+    "SZPONTNET_PLATFORM": "DIPLOMAT_MESH_PLATFORM",
+    "SZPONTNET_SPAWN": "DIPLOMAT_MESH_SPAWN",
     # Chapter-11 role knobs (11-trust-and-balancing).
-    "SZPONTNET_SERVER": "ARGENT_MESH_SERVER",     # accept-only server role
-    "SZPONTNET_API_KEY": "ARGENT_MESH_API_KEY",   # inbound ctl/dispatch gate
-    "SZPONTNET_DEFAULT_TRUST": "ARGENT_MESH_DEFAULT_TRUST",  # default level for unlisted devices
+    "SZPONTNET_SERVER": "DIPLOMAT_MESH_SERVER",     # accept-only server role
+    "SZPONTNET_API_KEY": "DIPLOMAT_MESH_API_KEY",   # inbound ctl/dispatch gate
+    "SZPONTNET_DEFAULT_TRUST": "DIPLOMAT_MESH_DEFAULT_TRUST",  # default level for unlisted devices
     # Chapter-13 foreign zero-trust execution: the confinement runner that turns a
     # foreign request from declined into confined, response-only, plus fast foreign
     # reliable-delivery timings so a loopback scenario observes retry/ack quickly.
-    "SZPONTNET_FOREIGN_SPAWN": "ARGENT_MESH_FOREIGN_SPAWN",  # confinement runner
-    "SZPONTNET_RESULT_RETRY_SECS": "ARGENT_MESH_RESULT_RETRY_SECS",
-    "SZPONTNET_RESULT_MAX_SECS": "ARGENT_MESH_RESULT_MAX_SECS",
-    "SZPONTNET_FOREIGN_TIMEOUT_SECS": "ARGENT_MESH_FOREIGN_TIMEOUT_SECS",
+    "SZPONTNET_FOREIGN_SPAWN": "DIPLOMAT_MESH_FOREIGN_SPAWN",  # confinement runner
+    "SZPONTNET_RESULT_RETRY_SECS": "DIPLOMAT_MESH_RESULT_RETRY_SECS",
+    "SZPONTNET_RESULT_MAX_SECS": "DIPLOMAT_MESH_RESULT_MAX_SECS",
+    "SZPONTNET_FOREIGN_TIMEOUT_SECS": "DIPLOMAT_MESH_FOREIGN_TIMEOUT_SECS",
     # Chapter-13 v0.4.0 foreign accountability: shrink the completion deadline /
     # reminder grace so the accept → deadline → reminder → ban cycle is observable
     # in seconds, and point the extension decision at a command (`{job_file}`
     # substituted; exit 0 extends, anything else bans).
-    "SZPONTNET_COMPLETION_DEADLINE_SECS": "ARGENT_MESH_COMPLETION_DEADLINE_SECS",
-    "SZPONTNET_REMINDER_GRACE_SECS": "ARGENT_MESH_REMINDER_GRACE_SECS",
-    "SZPONTNET_EXTEND_DECIDER": "ARGENT_MESH_EXTEND_DECIDER",
+    "SZPONTNET_COMPLETION_DEADLINE_SECS": "DIPLOMAT_MESH_COMPLETION_DEADLINE_SECS",
+    "SZPONTNET_REMINDER_GRACE_SECS": "DIPLOMAT_MESH_REMINDER_GRACE_SECS",
+    "SZPONTNET_EXTEND_DECIDER": "DIPLOMAT_MESH_EXTEND_DECIDER",
 }
 
 
@@ -104,18 +104,18 @@ def main() -> None:
     for src, dst in _MAP.items():
         if src in os.environ:
             env[dst] = os.environ[src]
-    env["ARGENT_MESH_DIR"] = str(work_dir)
+    env["DIPLOMAT_MESH_DIR"] = str(work_dir)
     # Keep the reference's activity feed inside the scenario dir, not real ~/.argent.
     env["HOME"] = str(work_dir)
     # A conformance candidate must be deterministic: no live OAuth quota probe.
     # (On macOS the Keychain resolves even under the sandboxed HOME, and a live
     # read would cap the advertised quotaLeft with this machine's real budget,
     # skewing seeded ch-11 stats.)
-    env["ARGENT_MESH_OAUTH_PROBE"] = "0"
+    env["DIPLOMAT_MESH_OAUTH_PROBE"] = "0"
     env["PYTHONPATH"] = os.pathsep.join([str(LINUX), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
 
     os.chdir(str(LINUX))
-    os.execvpe(sys.executable, [sys.executable, "-m", "argent_utils.mesh"], env)
+    os.execvpe(sys.executable, [sys.executable, "-m", "diplomat_app.mesh"], env)
 
 
 if __name__ == "__main__":

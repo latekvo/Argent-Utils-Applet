@@ -6,8 +6,8 @@ network find each other, **advertise the resources they have available**, and
 hand work to whichever machine is the best fit - with no central coordinator and
 automatic take-over when a machine drops.
 
-SzpontNet is the *protocol*. **Argent Mesh** (in this repository under
-[`linux/argent_utils/mesh/`](../../linux/argent_utils/mesh)) is its reference
+SzpontNet is the *protocol*. **Diplomat Mesh** (in this repository under
+[`linux/diplomat_app/mesh/`](../../linux/diplomat_app/mesh)) is its reference
 implementation; the shared constants live in
 [`core/mesh.json`](../../core/mesh.json). This spec is written so that a second,
 independent implementation - in any language - can join the same mesh and
@@ -91,7 +91,7 @@ you.
 **Safe by default: a new device is foreign.** Out of the box a device you have not
 promoted can't run your requests, mutate your node, or own work - you grant trust one
 device at a time. The default level is operator-configurable per node (a panel toggle
-/ `--default-trust` / `ARGENT_MESH_DEFAULT_TRUST`, persisted locally): set it to
+/ `--default-trust` / `DIPLOMAT_MESH_DEFAULT_TRUST`, persisted locally): set it to
 **personal** for a fleet of machines you all own and every unlisted peer is trusted,
 exactly as the pre-trust core behaved. Trust is a purely local decision (never on the
 wire), so either default interoperates with any other node. The join fence
@@ -195,9 +195,9 @@ that only wants to *offer* resources. The exact minimal set is enumerated in
 
 ## Relationship to the reference implementation
 
-Everything in this spec is implemented and exercised by Argent Mesh:
+Everything in this spec is implemented and exercised by Diplomat Mesh:
 
-- Wire protocol & node: [`linux/argent_utils/mesh/`](../../linux/argent_utils/mesh)
+- Wire protocol & node: [`linux/diplomat_app/mesh/`](../../linux/diplomat_app/mesh)
   (`protocol.py`, `node.py`, `assign.py`, `identity.py`, `statefile.py`, `ctl.py`).
 - Shared constants & vocabulary: [`core/mesh.json`](../../core/mesh.json).
 - Interop-relevant behavior is covered by

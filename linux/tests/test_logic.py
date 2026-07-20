@@ -12,11 +12,11 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from argent_utils import review  # noqa: E402
-from argent_utils.models import Filters, Fmt, OpenIssue, OpenPR, ReviewThread  # noqa: E402
-from argent_utils.prref import parse_pr_ref  # noqa: E402
-from argent_utils.prtarget import PRTarget  # noqa: E402
-from argent_utils.store import Store  # noqa: E402
+from diplomat_app import review  # noqa: E402
+from diplomat_app.models import Filters, Fmt, OpenIssue, OpenPR, ReviewThread  # noqa: E402
+from diplomat_app.prref import parse_pr_ref  # noqa: E402
+from diplomat_app.prtarget import PRTarget  # noqa: E402
+from diplomat_app.store import Store  # noqa: E402
 
 NOW = datetime.now(timezone.utc)
 OLD = NOW - timedelta(days=15)
@@ -153,7 +153,7 @@ def test_final_pass_never_applies_to_my_own_prs():
     # (Swift: canFinalPass = disposition != .mine).
     mine = review.ReviewConfig(me="latekvo", final_pass=True)
     assert not mine.can_final_pass
-    # The gating now lives in Swift (argent-core); assert the observable behavior.
+    # The gating now lives in Swift (diplomat-core); assert the observable behavior.
     assert "FULL E2E pass" not in mine.build_prompt()
 
     # Someone else's PRs and a specific PR (author unknown) keep the escalation.
@@ -176,9 +176,9 @@ def test_final_pass_never_applies_to_my_own_prs():
 
 def test_specific_pr_disposition_drives_toggles_and_prompt():
     # A specific PR's polled author (mine / theirs / unknown) picks the disposition,
-    # which decides both the visible action toggles and the argent-core prompt -
-    # mirroring ReviewConfig.disposition / canX in ArgentUtilsCore/Review.swift.
-    from argent_utils.review import SpecificAuthor
+    # which decides both the visible action toggles and the diplomat-core prompt -
+    # mirroring ReviewConfig.disposition / canX in DiplomatCore/Review.swift.
+    from diplomat_app.review import SpecificAuthor
 
     def cfg(author: SpecificAuthor) -> review.ReviewConfig:
         return review.ReviewConfig(
@@ -224,7 +224,7 @@ def test_specific_pr_disposition_drives_toggles_and_prompt():
 def test_sweep_disposition_follows_target_not_specific_author():
     # For a whose-PRs sweep the disposition follows the target regardless of any
     # stale specific_author value (which only applies to a single PR).
-    from argent_utils.review import SpecificAuthor
+    from diplomat_app.review import SpecificAuthor
 
     mine = review.ReviewConfig(me="latekvo", specific_author=SpecificAuthor.THEIRS)
     assert mine.disposition == SpecificAuthor.MINE
@@ -302,7 +302,7 @@ def test_review_single_pr_accepts_url():
 
 
 def test_conflict_single_pr_accepts_url():
-    from argent_utils.conflicts import ConflictConfig, Target
+    from diplomat_app.conflicts import ConflictConfig, Target
 
     ok = ConflictConfig(
         target=Target.SPECIFIC,
@@ -321,7 +321,7 @@ def test_review_prompt_trailer_has_no_ai_attribution():
 
 
 def test_audit_prompt_toggles_gate_blocks():
-    from argent_utils.audit import AuditConfig
+    from diplomat_app.audit import AuditConfig
 
     # The whole-repo audit needs no input and the hard-repro bar is always present.
     base = AuditConfig().build_prompt()
@@ -362,7 +362,7 @@ def test_audit_prompt_toggles_gate_blocks():
 
 
 def test_device_allocator_state_helpers():
-    from argent_utils import deviceallocator as da
+    from diplomat_app import deviceallocator as da
 
     state = {"devices": [
         {"status": "ready", "owner": {"agentName": "a", "ownerPid": 1}},
@@ -425,7 +425,7 @@ if __name__ == "__main__":
         # Fresh isolated dir per test, exactly like conftest's autouse fixture —
         # it doubles as the `tmp_path` fixture for tests that take one (the
         # isolation test asserts settings land in ITS tmp_path).
-        fresh = Path(tempfile.mkdtemp(prefix="argent-utils-test-"))
+        fresh = Path(tempfile.mkdtemp(prefix="diplomat-test-"))
         QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(fresh))
         kwargs = {"tmp_path": fresh} if "tmp_path" in inspect.signature(fn).parameters else {}
         fn(**kwargs)

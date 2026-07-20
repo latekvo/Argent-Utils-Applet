@@ -43,9 +43,9 @@ def isolated_activity_feed(tmp_path, monkeypatch):
     watcher dispatch paths call :func:`activity.log`, which otherwise appends to the
     user's live feed (``activity._dir`` resolves via ``Path.home()``, which the
     QSettings redirect above does not cover)."""
-    from argent_utils import activity
+    from diplomat_app import activity
 
-    feed = tmp_path / "argent-feed"
+    feed = tmp_path / "diplomat-feed"
     feed.mkdir()
     monkeypatch.setattr(activity, "_dir", lambda: feed)
     yield
