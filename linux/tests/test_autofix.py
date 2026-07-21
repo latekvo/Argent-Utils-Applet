@@ -325,6 +325,29 @@ def test_work_key_safe_degradation():
     assert autofix.work_key("review", "", "x") == ""
 
 
+def test_parse_work_key_round_trips_the_builder():
+    # The executor's ps floor parses back exactly what work_key emits: kind,
+    # owner, repo, pr — the sha is intentionally dropped (dedup is per-PR, so a
+    # fresh push can't dodge an agent already reviewing the PR).
+    for kind, url, sha, want in [
+        ("review", "https://github.com/acme/app/pull/123", "abc123",
+         ("review", "acme", "app", 123)),
+        ("conflicts", "https://github.com/a/b/pull/9", "F00", ("conflicts", "a", "b", 9)),
+        ("review-reply", "https://GitHub.com/Acme/App/pull/5", "AbC",
+         ("review-reply", "Acme", "App", 5)),
+    ]:
+        key = autofix.work_key(kind, url, sha)
+        assert autofix.parse_work_key(key) == want
+
+
+def test_parse_work_key_rejects_non_pr_keys():
+    # Anything work_key never emits parses to None → the ps floor is skipped and
+    # the spawn proceeds (no false suppression on a malformed / empty key).
+    for bad in ["", "review", "review:github.com/acme/app", "audit",
+                "review:github.com/acme/app#nope@sha", "review:acme/app#1@s"]:
+        assert autofix.parse_work_key(bad) is None
+
+
 # MARK: - Store routing (the monitor routes auto work through the mesh)
 
 

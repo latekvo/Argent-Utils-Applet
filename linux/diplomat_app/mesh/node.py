@@ -35,6 +35,7 @@ import os
 import secrets
 import socket
 import struct
+import subprocess
 import time
 import uuid
 from collections.abc import Callable
@@ -1740,6 +1741,19 @@ class MeshNode:
         # key arriving back-to-back can never both pass it.
         if wk and wk in self._agents:
             return "spawned", ""
+        # Ground-truth floor for the EXECUTOR — the same one the ORIGINATING side
+        # has always had (Store._in_flight). `_agents` only remembers agents THIS
+        # node incarnation spawned; an agent can be live on the host yet absent
+        # from it — the applet's fail-open local spawn (no claim, no book entry), a
+        # node restart / singleton respawn after a deploy (book wiped, agent lives
+        # on), or a manual SPAWN. A peer routing that same work here sees no claim
+        # and its own ps-scan can't see our host, so without this check we'd launch
+        # a duplicate onto a PR already under review. Keyed on the PR, not the exact
+        # work key, so a fresh push (new @sha) can't dodge it either.
+        if wk and self._pr_agent_running(wk):
+            activity.log("mesh", "mesh-dedup",
+                         f"Already running {job.duty} for this PR here — not double-spawning")
+            return "spawned", ""
         done_path = self._agent_done_path(wk) if wk else None
         try:
             spawnjob.spawn_job(job.prompt, done_path=done_path)
@@ -1757,6 +1771,30 @@ class MeshNode:
         activity.log("mesh", "mesh-spawn",
                      f"Mesh: running {job.duty} (from {self._node_name(job.requested_by)})")
         return "spawned", ""
+
+    def _pr_agent_running(self, work_key: str) -> bool:
+        """Is a live ``claude`` agent for this work key's PR already running on THIS
+        host? The executor's ground-truth floor against a double-spawn (see
+        `_spawn_local`). Reuses the ORIGINATING side's matcher (`live_pr_numbers`)
+        so both sides agree on what "an agent is on this PR" means. Fails OPEN — a
+        ps error reads as "not seen" so a transient failure never drops work — the
+        same trade the store's `_live_pr_agents` makes.
+
+        ``ps -Ao args=`` is the portable spelling: on macOS ``-e`` prints the
+        environment, not every process, so the store's Linux-only ``-eo`` can't be
+        reused in this cross-platform node (it runs on both OSes)."""
+        from .. import autofix
+
+        ref = autofix.parse_work_key(work_key)
+        if ref is None:
+            return False
+        _kind, owner, repo, number = ref
+        try:
+            out = subprocess.run(["ps", "-Ao", "args="],
+                                 capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return number in autofix.live_pr_numbers(out, owner, repo)
 
     def _agent_done_path(self, work_key: str) -> str:
         """A per-agent completion-sentinel path under the mesh dir (NOT /tmp, which
