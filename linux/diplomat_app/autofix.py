@@ -239,6 +239,34 @@ def work_key(kind: str, pr_url: str, head_sha: str) -> str:
     return f"{kind}:{host}/{parts[0]}/{parts[1]}#{parts[3]}@{head_sha}"
 
 
+def parse_work_key(key: str) -> tuple[str, str, str, int] | None:
+    """Inverse of :func:`work_key`: split ``<kind>:<host>/<owner>/<repo>#<n>@<sha>``
+    into ``(kind, owner, repo, pr_number)``. Returns None when ``key`` isn't a PR
+    work key (empty, or any shape :func:`work_key` never emits).
+
+    The executor's ps ground-truth floor uses this to learn which PR a dispatched
+    unit of work is for, then asks :func:`live_pr_numbers` whether an agent for it
+    is already alive on the host — so it dedups on the PR (like the ps-scan), never
+    on the exact key, and a fresh push (new ``@sha``) can't sneak a second agent
+    onto a PR already under review."""
+    if not key or ":" not in key:
+        return None
+    kind, rest = key.split(":", 1)
+    # <host>/<owner>/<repo>#<n>@<sha> — owner/repo/host never contain '#' or '@',
+    # and a sha is hex, so peeling from the right is unambiguous.
+    if "#" not in rest or "@" not in rest:
+        return None
+    left, _sha = rest.rsplit("@", 1)
+    path, num = left.rsplit("#", 1)
+    if not num.isdigit():
+        return None
+    segs = [p for p in path.split("/") if p]
+    if len(segs) != 3:  # host / owner / repo
+        return None
+    _host, owner, repo = segs
+    return kind, owner, repo, int(num)
+
+
 # MARK: - Unified dispatch gate (one workflow, two triggers)
 #
 # The SPAWN buttons and the auto-monitors are two TRIGGERS for the very same

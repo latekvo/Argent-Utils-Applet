@@ -28,6 +28,7 @@ POSIX only; needs loopback multicast (as the mesh integration tests do).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -38,8 +39,18 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from diplomat_app import autofix  # the shared work-key parser (one source of truth)
+
 LINUX_DIR = Path(__file__).resolve().parents[1]
 _AGENT = Path(__file__).resolve().parent / "mesh_sim_agent.py"
+
+
+def _pr_ref(work_key: str) -> tuple[str, str, str, int]:
+    ref = autofix.parse_work_key(work_key)
+    if ref is None:
+        raise SimFailure(f"not a PR work key: {work_key!r}")
+    return ref
 
 
 def loopback_multicast_works() -> bool:
@@ -115,6 +126,7 @@ class Simulator:
     specs: list[NodeSpec] = field(default_factory=list)
     procs: dict[str, subprocess.Popen] = field(default_factory=dict)
     dirs: dict[str, Path] = field(default_factory=dict)
+    foreign_agents: list[subprocess.Popen] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not self.port_base:
@@ -168,9 +180,33 @@ class Simulator:
             self._pending_stats = getattr(self, "_pending_stats", [])
             self._pending_stats.append(spec)
 
+    def start_foreign_agent(self, work_key: str, hold: float = 30.0) -> None:
+        """Put a live ``claude`` agent for ``work_key``'s PR on the host WITHOUT
+        going through any node — a process the executor's ``_agents`` book never
+        recorded (the applet's fail-open local spawn, a pre-restart incarnation, a
+        manual SPAWN). ``ps`` shows it as ``claude Review PR #<n> in <owner>/<repo>``,
+        exactly what the executor's ground-truth floor keys on.
+
+        All sim nodes share one host, so this is the only ``claude``-shaped process
+        in the fleet — the plain stub agents never match the floor, so it stays
+        inert for every other scenario."""
+        _kind, owner, repo, number = _pr_ref(work_key)
+        title = f"claude Review PR #{number} in {owner}/{repo}. Use the `gh` CLI."
+        self.foreign_agents.append(subprocess.Popen(
+            ["bash", "-c", f"exec -a {title!r} sleep {hold}"],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ))
+
     def stop_all(self) -> None:
         for node_id in list(self.procs):
             self.kill(node_id)
+        for agent in self.foreign_agents:
+            agent.terminate()
+        for agent in self.foreign_agents:
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                agent.wait(timeout=5)
+        self.foreign_agents.clear()
 
     def kill(self, node_id: str) -> None:
         proc = self.procs.pop(node_id, None)
@@ -453,9 +489,43 @@ def scenario_retry_after_completion(root: Path) -> None:
         sim.stop_all()
 
 
+def scenario_no_double_on_untracked_live_agent(root: Path) -> None:
+    """An agent already live on a host, but absent from that node's `_agents`
+    book (fail-open local spawn / a restart after a deploy / a manual SPAWN), must
+    not be double-run when a PEER routes the same work there. Regression for the
+    field bug: right after a deploy, work already computing on a host got a second
+    identical agent on that same host, because the receiving path trusted only its
+    in-memory book and never consulted the ps ground-truth floor the originating
+    side has always had."""
+    sim = _fresh(root, "no_double_untracked")
+    # bravo is the sole linux node → owns the `review` duty (weakest-first), so a
+    # dispatch from the mac peer routes there. alpha (mac) is the peer/dispatcher.
+    sim.add(NodeSpec("aaaa1111", "alpha", "macos", tier=1))
+    sim.add(NodeSpec("bbbb2222", "bravo", "linux", tier=4))
+    sim.start()
+    try:
+        sim.await_links()
+        sim.await_assignments_agree()
+        wk = "review:github.com/acme/app#8@hhh"
+        # An agent for PR #8 is ALREADY at work on the host, untracked by any node.
+        sim.start_foreign_agent(wk)
+        sim.settle(1.0)  # let it appear in ps
+        # The peer finds the same work and routes it to the executor (bravo).
+        sim.inject(wk, from_node="aaaa1111")
+        sim.settle(3.0)
+        runners = sim.runners_of(wk)
+        if runners:
+            raise SimFailure(
+                "executor double-spawned onto a PR that already has a live agent "
+                f"(receiving path ignored the ps floor): {runners}")
+    finally:
+        sim.stop_all()
+
+
 SCENARIOS = {
     "exactly_once": scenario_exactly_once,
     "no_double_on_reinject": scenario_no_double_on_reinject,
+    "no_double_on_untracked_live_agent": scenario_no_double_on_untracked_live_agent,
     "best_fit": scenario_best_fit,
     "failover": scenario_failover,
     "retry_after_completion": scenario_retry_after_completion,
