@@ -66,10 +66,13 @@ A two-pane screen matching macOS. Persist via `QSettings` (`~/.config/diplomat/�
 - **GitHub username** — overrides the `gh`-authenticated login for the "My …" tools.
 - **Repo root** — the local checkout every spawned agent `cd`s into, with a
   **Browse…** picker. Blank = `~/dev/<repo>` for the repo `core/config.json`
-  targets; `DIPLOMAT_REPO` still outranks both. The hint warns when the resolved
-  path has no `.git` (the spawn's `cd` is best-effort, so the agent would
-  otherwise start in `$HOME` unnoticed). Read straight from `QSettings` by the
-  mesh node too, so a job that lands over the mesh works in the same checkout.
+  targets; `DIPLOMAT_REPO` still outranks both. The hint warns when the path isn't
+  absolute, or has no `.git` (the spawn's `cd` is best-effort, so the agent would
+  otherwise start in `$HOME` unnoticed). The one setting that is **not** in
+  `QSettings`: it lives in the shared `~/.diplomat/config.json` (`appconfig.py`)
+  because a mesh node is a separate, stdlib-only process with no Qt — so a job
+  that lands over the mesh uses the same checkout, and a *running* node picks up
+  a change on its next spawn.
 - **PR auto-fix / Full-E2E review requests** — the two monitor toggles with live
   status, and under the review-requests one the **auto-approve** master toggle
   plus its three withhold-the-verdict suppressors (SKILL / installer / community),
@@ -123,8 +126,9 @@ DIPLOMAT_RENDER=panel DIPLOMAT_RENDER_OUT=/tmp/p.png \
 DIPLOMAT_REFRESH_SECS=30 ./diplomat            # faster auto-refresh, for tuning
 ```
 
-Also overridable: `DIPLOMAT_REPO` (the agents' working dir - outranks Settings ▸
-*Repo root*, whose own default is `~/dev/<repo>`),
+Also overridable: `DIPLOMAT_REPO` (the agents' working dir — outranks Settings ▸
+*Repo root*, whose own default is `~/dev/<repo>`), `DIPLOMAT_CONFIG` (where the
+shared `config.json` lives),
 `DIPLOMAT_CORE_BIN`, `DIPLOMAT_AUTOFIX_SECS` (floor 30s), `DIPLOMAT_APIWATCH_SECS`
 (floor 5s), `DIPLOMAT_SHELL`, `DIPLOMAT_PYTHON`, `DIPLOMAT_NPM`.
 
@@ -169,7 +173,7 @@ linux/diplomat_app/
   gh.py           gh CLI shell-out (GraphQL)
   models.py       domain models, Filters, Fmt, API (from core/)
   store.py        state, QSettings, tool catalog, row mapping, lookup
-  prefs.py        the QSettings handle + keys shared with the headless mesh node
+  appconfig.py    ~/.diplomat/config.json — the settings a stdlib-only mesh node must read too
   prref.py        single-PR reference parsing (number / URL / owner-repo#337)
   prtarget.py     the whose-PRs axis shared by the wizards
   promptcore.py   shells out to the diplomat-core binary — the ONLY prompt assembly

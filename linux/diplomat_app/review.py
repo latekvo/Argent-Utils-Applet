@@ -23,7 +23,7 @@ import tempfile
 from dataclasses import dataclass
 from enum import Enum
 
-from . import core
+from . import appconfig, core
 from .configbase import PRSweepConfig
 from .prtarget import PRTarget
 
@@ -254,22 +254,16 @@ def default_repo_path() -> str:
 def stored_repo_path() -> str:
     """The repo root picked in Settings, or "" when unset.
 
-    Read straight from QSettings rather than through the Store: the mesh node spawns
-    agents from its own process, where there is no Store to ask (see prefs)."""
-    from . import prefs
-
-    try:
-        raw = prefs.settings().value(prefs.REPO_PATH, "", str)
-    except Exception:  # noqa: BLE001 - no Qt / unreadable settings: fall back silently
-        return ""
-    return (raw or "").strip()
+    Read from the shared :mod:`appconfig` file rather than this front-end's QSettings:
+    a mesh node spawns agents from its own stdlib-only process, which has no Store and
+    no Qt to ask. Re-read per call, so changing the setting reaches a running node."""
+    return appconfig.get(appconfig.REPO_ROOT).strip()
 
 
 def repo_path() -> str:
     """The local checkout the agent works in — the ``cd`` in every spawned session.
 
-    Strongest first: the ``DIPLOMAT_REPO`` env override (how the macOS front-end hands
-    its own UserDefaults-stored choice to a mesh node, and the escape hatch every other
+    Strongest first: the ``DIPLOMAT_REPO`` env override (the escape hatch every other
     ``DIPLOMAT_*`` knob follows), the repo root picked in Settings, then
     :func:`default_repo_path`.
     """

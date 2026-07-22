@@ -488,14 +488,19 @@ def test_unaddressed_threads_login_compare_is_case_insensitive():
 
 
 def test_repo_path_resolution(tmp_path):
-    """Settings → REPO ROOT drives the `cd` in every spawned session, with
-    DIPLOMAT_REPO still outranking it (that's how the macOS front-end hands its own
-    stored choice to a mesh node) and ~/dev/<repo> as the fallback."""
+    """Settings → REPO ROOT drives the `cd` in every spawned session.
+
+    It lives in the shared appconfig file rather than QSettings so a mesh node — its
+    own stdlib-only process, no Qt, no Store — resolves the same value on its next
+    spawn. DIPLOMAT_REPO still outranks it; ~/dev/<repo> is the fallback.
+    """
     import shlex
 
-    from diplomat_app import core
+    from diplomat_app import appconfig, core
 
-    prior = os.environ.pop("DIPLOMAT_REPO", None)
+    prior_repo = os.environ.pop("DIPLOMAT_REPO", None)
+    prior_config = os.environ.get("DIPLOMAT_CONFIG")
+    os.environ["DIPLOMAT_CONFIG"] = str(tmp_path / "config.json")
     try:
         # Nothing set anywhere: the conventional path for the configured target repo.
         assert review.default_repo_path() == os.path.expanduser(
@@ -503,39 +508,47 @@ def test_repo_path_resolution(tmp_path):
         )
         assert review.repo_path() == review.default_repo_path()
 
-        # The Settings pick wins over the default, and reaches a separate reader
-        # (the mesh node reads QSettings, not the Store).
+        # The Settings pick wins over the default and lands in the shared file — the
+        # exact bytes a node (which has no Store to ask) reads back.
         store = Store()
         picked = str(tmp_path / "clone")
         store.repo_path_override = picked
-        store._settings.sync()
         assert store.repo_path_override == picked
+        assert appconfig.read() == {"repoRoot": picked}
         assert review.stored_repo_path() == picked
         assert review.repo_path() == picked
 
         # A hand-typed "~/…" expands like the shell would — the spawn single-quotes
         # the path, so the shell itself never gets the chance.
         store.repo_path_override = "~/dev/typed"
-        store._settings.sync()
         assert review.repo_path() == os.path.expanduser("~/dev/typed")
         assert review.shell_command("/tmp/p.txt").startswith(
             f"cd {shlex.quote(os.path.expanduser('~/dev/typed'))} 2>/dev/null;"
         )
 
-        # Blank clears it back to the default.
+        # Whitespace-only is blank; blank drops the key rather than storing "".
         store.repo_path_override = "  "
-        store._settings.sync()
+        assert review.repo_path() == review.default_repo_path()
+        store.repo_path_override = ""
+        assert appconfig.read() == {}
+        assert review.repo_path() == review.default_repo_path()
+
+        # A truncated / hand-edited file degrades to the default instead of breaking
+        # every spawn.
+        (tmp_path / "config.json").write_text("{ not json", encoding="utf-8")
         assert review.repo_path() == review.default_repo_path()
 
         # The env override outranks the stored pick.
         store.repo_path_override = picked
-        store._settings.sync()
         os.environ["DIPLOMAT_REPO"] = str(tmp_path / "env-clone")
         assert review.repo_path() == str(tmp_path / "env-clone")
     finally:
         os.environ.pop("DIPLOMAT_REPO", None)
-        if prior is not None:
-            os.environ["DIPLOMAT_REPO"] = prior
+        if prior_repo is not None:
+            os.environ["DIPLOMAT_REPO"] = prior_repo
+        os.environ.pop("DIPLOMAT_CONFIG", None)
+        if prior_config is not None:
+            os.environ["DIPLOMAT_CONFIG"] = prior_config
 
 
 if __name__ == "__main__":

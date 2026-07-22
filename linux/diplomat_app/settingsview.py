@@ -188,21 +188,36 @@ class SettingsView(QWidget):
             # together (textChanged -> on_text).
             self._repo_field.setText(chosen)
 
-    def _refresh_repo_ui(self) -> None:
-        """Hint + colour for the three states: shadowed by the env override, no
-        checkout at the resolved path (the spawn's ``cd`` is best-effort, so the agent
-        would silently start in $HOME), or good."""
+    def _repo_state(self) -> str:
+        """Which of the four hint states applies. A relative entry gets its own:
+        an "is it a checkout?" stat would be judged against THIS process's working
+        directory while the spawn's ``cd`` runs in the terminal's — the two disagree,
+        so neither verdict is honest. Mirrors ``RepoPaths.agentRepoState`` in Swift."""
+        if os.environ.get("DIPLOMAT_REPO"):
+            return "env-shadowed"
         resolved = review.repo_path()
-        env = os.environ.get("DIPLOMAT_REPO")
-        is_checkout = os.path.exists(os.path.join(resolved, ".git"))
+        if not os.path.isabs(resolved):
+            return "not-absolute"
+        return "ok" if os.path.exists(os.path.join(resolved, ".git")) else "not-a-checkout"
+
+    def _refresh_repo_ui(self) -> None:
+        """Hint + colour, from one state read so the two can't disagree."""
+        state = self._repo_state()
+        resolved = review.repo_path()
         owner, repo = core.config()["owner"], core.config()["repo"]
-        if env:
+        if state == "env-shadowed":
+            env = os.environ.get("DIPLOMAT_REPO", "")
             text = (
                 "DIPLOMAT_REPO is set in this app's environment — agents run in "
                 f"{os.path.expanduser(env)}, whatever this field says. Unset it to use "
                 "the picker again."
             )
-        elif not is_checkout:
+        elif state == "not-absolute":
+            text = (
+                "Use an absolute path — a relative one resolves against whatever "
+                "directory the spawned terminal happens to start in, not this app's."
+            )
+        elif state == "not-a-checkout":
             text = (
                 f"No git checkout at {resolved} — the spawn's `cd` is best-effort, so an "
                 "agent would start in your home directory instead. Pick the clone of "
@@ -214,10 +229,9 @@ class SettingsView(QWidget):
                 f"Every spawned agent starts with `cd {resolved}` — your local clone of "
                 f"{owner}/{repo}.{tail}"
             )
-        ok = not env and is_checkout
         self._repo_hint.setText(text)
         self._repo_hint.setStyleSheet(
-            f"color: {'palette(mid)' if ok else '#FF9500'}; font-size: 10px;"
+            f"color: {'palette(mid)' if state == 'ok' else '#FF9500'}; font-size: 10px;"
         )
 
     # MARK: PR auto-fix monitor

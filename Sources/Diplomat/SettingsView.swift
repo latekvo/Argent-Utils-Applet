@@ -379,20 +379,26 @@ struct SettingsView: View {
     }
 
     /// Precomputed outside the ViewBuilder (SwiftUI type-checker budget — same reason
-    /// as `meshBlurb`), and it keeps the three states readable in one place.
+    /// as `meshBlurb`). One `agentRepoState` read decides both the text and the colour,
+    /// so they can't disagree and the filesystem is stat'd once per render.
     private var repoHint: String {
         let resolved = RepoPaths.agentRepo
-        if let env = RepoPaths.agentRepoEnvOverride {
-            return "DIPLOMAT_REPO is set in this app's environment — agents run in \(env), "
-                + "whatever this field says. Unset it to use the picker again."
-        }
-        if !RepoPaths.isCheckout(resolved) {
+        switch RepoPaths.agentRepoState {
+        case .envShadowed:
+            return "DIPLOMAT_REPO is set in this app's environment — agents run in "
+                + "\(RepoPaths.agentRepoEnvOverride ?? resolved), whatever this field says. "
+                + "Unset it to use the picker again."
+        case .notAbsolute:
+            return "Use an absolute path — a relative one resolves against whatever "
+                + "directory the spawned terminal happens to start in, not this app's."
+        case .notACheckout:
             return "No git checkout at \(resolved) — the spawn's `cd` is best-effort, so an "
                 + "agent would start in your home directory instead. Pick the clone of "
                 + "\(repoSlug)."
+        case .ok:
+            return "Every spawned agent starts with `cd \(resolved)` — your local clone of "
+                + "\(repoSlug)\(trimmedRepoPath.isEmpty ? ". Blank = the default path." : ".")"
         }
-        return "Every spawned agent starts with `cd \(resolved)` — your local clone of "
-            + "\(repoSlug)\(trimmedRepoPath.isEmpty ? ". Blank = the default path." : ".")"
     }
 
     private var repoSlug: String {
@@ -400,11 +406,9 @@ struct SettingsView: View {
         return "\(c.owner)/\(c.repo)"
     }
 
-    /// Orange when the resolved path can't work (missing checkout) or is being shadowed
-    /// by the env override — both make the field's value a no-op.
+    /// Orange for every state where the field's value isn't what agents will use.
     private var repoHintColor: Color {
-        (RepoPaths.agentRepoEnvOverride != nil || !RepoPaths.isCheckout(RepoPaths.agentRepo))
-            ? .orange : .secondary
+        RepoPaths.agentRepoState == .ok ? .secondary : .orange
     }
 
     private var repoSection: some View {

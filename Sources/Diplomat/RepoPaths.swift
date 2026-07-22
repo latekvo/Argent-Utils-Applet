@@ -1,9 +1,13 @@
 import Foundation
 import DiplomatCore
 
-/// Where the running app's own git checkout lives on disk — the source tree behind
-/// both the self-update (git pull + rebuild) and the mesh node (`python3 -m
-/// diplomat_app.mesh`, which runs from `<repo>/linux`).
+/// The two repository roots the app cares about: its OWN checkout (`root` — the source
+/// tree behind self-update and the mesh node) and the TARGET repo the agents work in
+/// (`agentRepo` — Settings → REPO ROOT). They are unrelated paths; keeping both here
+/// keeps the two resolutions from being confused for each other.
+///
+/// `root` is the source tree behind both the self-update (git pull + rebuild) and the
+/// mesh node (`python3 -m diplomat_app.mesh`, which runs from `<repo>/linux`).
 ///
 /// A packaged `Diplomat.app` is decoupled from its source (it may sit in
 /// /Applications), so the checkout is located by, in order: an explicit env override,
@@ -41,11 +45,6 @@ enum RepoPaths {
 
     // MARK: - the TARGET repo (where the agents work)
 
-    /// UserDefaults key behind Settings → REPO ROOT. Single-sourced here (rather than
-    /// in `Store.Keys`) because the resolution below has to read it without a Store —
-    /// same reason `Store.storedTerminalChoice` exists.
-    static let agentRepoKey = "agentRepoPath"
-
     /// The checkout every spawned agent `cd`s into — the local clone of the *target*
     /// repo from `core/config.json` (`software-mansion/argent`), NOT Diplomat's own
     /// source tree (`root`).
@@ -54,18 +53,21 @@ enum RepoPaths {
     /// knob wins over stored state, and the Linux front-end reads the same variable),
     /// the path picked in Settings, then `~/dev/<repo>`. The Settings hint calls the
     /// env override out when it's set, so a shadowed field is never a silent no-op.
+    ///
+    /// Re-read on every use (a spawn, a hint refresh): the pick lives in the shared
+    /// `AppConfig` file precisely so a change reaches a *running* mesh node too.
     static var agentRepo: String {
-        if let env = ProcessInfo.processInfo.environment["DIPLOMAT_REPO"], !env.isEmpty {
-            return expand(env)
-        }
+        if let env = agentRepoEnvOverride { return env }
         let stored = storedAgentRepo
         return stored.isEmpty ? defaultAgentRepo : expand(stored)
     }
 
     /// The user's pick from Settings, trimmed; empty when unset (⇒ fall back).
-    static var storedAgentRepo: String {
-        (UserDefaults.standard.string(forKey: agentRepoKey) ?? "")
-            .trimmingCharacters(in: .whitespaces)
+    /// Newlines are trimmed too — one would otherwise break the spawn's AppleScript
+    /// string literal (the Linux twin's `.strip()` does the same).
+    private static var storedAgentRepo: String {
+        AppConfig.string(AppConfig.repoRootKey)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// `~/dev/<repo>` — the conventional checkout path for whichever repo `core/config.json`
@@ -82,8 +84,21 @@ enum RepoPaths {
 
     /// Expand a leading `~` so a hand-typed "~/dev/argent" resolves like it would in
     /// the shell (the spawn command single-quotes the path, so the shell won't).
-    static func expand(_ path: String) -> String {
+    private static func expand(_ path: String) -> String {
         (path as NSString).expandingTildeInPath
+    }
+
+    /// How the Settings hint describes the resolved path. A relative entry gets its own
+    /// state: `isCheckout` would judge it against THIS app's working directory while the
+    /// spawn's `cd` runs in the terminal's — the two disagree, so neither verdict is
+    /// honest. Mirrors `settingsview._repo_state` on Linux.
+    enum AgentRepoState { case ok, envShadowed, notAbsolute, notACheckout }
+
+    static var agentRepoState: AgentRepoState {
+        if agentRepoEnvOverride != nil { return .envShadowed }
+        let path = agentRepo
+        if !path.hasPrefix("/") { return .notAbsolute }
+        return isCheckout(path) ? .ok : .notACheckout
     }
 
     /// Whether `path` is a git checkout (`.git` dir, or the file a worktree uses).
