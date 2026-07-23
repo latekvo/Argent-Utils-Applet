@@ -42,13 +42,15 @@ from . import protocol
 
 # The virtual port the onion service exposes. It is namespaced to the onion and
 # binds no real socket, so its exact value is arbitrary — but the service
-# definition (HiddenServicePort) and the dialer MUST agree on it. Kept distinct
-# and named rather than a bare 80 so a reader sees it is the mesh's own port.
-ONION_VIRTPORT = 40878
+# definition (HiddenServicePort) and the dialer MUST agree on it. The conventional
+# onion virtport; nothing on the host ever binds it, so it deliberately does NOT
+# reuse the mesh's real TCP port range.
+ONION_VIRTPORT = 80
 
 # A v3 onion address: 56 chars of base32 (a-z, 2-7) + ".onion". v2 (16 chars) is
-# dead and deliberately not matched.
-_ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
+# dead and deliberately not matched. ``\Z`` (not ``$``) so a trailing newline can
+# never sneak through, whatever the caller — normalize_onion strips first anyway.
+_ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion\Z")
 
 
 def is_onion(addr: str) -> bool:
@@ -80,23 +82,20 @@ def binary() -> str | None:
     return shutil.which(os.environ.get("DIPLOMAT_MESH_TOR_BINARY", "tor"))
 
 
-def available() -> bool:
-    """Whether a Tor transport could be started here (the binary is present)."""
-    return binary() is not None
-
-
 def _write_torrc(tor_dir: Path, socks_port: int, forward_to_port: int) -> Path:
     """Render a minimal torrc for our own private Tor: a client SOCKS port for
     outbound dials, and one persistent onion service forwarding ONION_VIRTPORT to
-    the node's loopback TCP listener. Everything lives under ``tor_dir`` so several
-    nodes on one host (each its own DIPLOMAT_MESH_DIR) never collide."""
+    the node's loopback Tor forward-listener. Everything lives under ``tor_dir`` so
+    several nodes on one host (each its own DIPLOMAT_MESH_DIR) never collide."""
     data_dir = tor_dir
     hs_dir = tor_dir / "onion"
-    # Tor refuses a DataDirectory / HiddenServiceDir that is not 0700.
-    data_dir.mkdir(parents=True, exist_ok=True)
+    # Tor refuses a DataDirectory / HiddenServiceDir that is not 0700. Create them
+    # 0700 from the start (mode is umask-masked, hence the belt-and-braces chmod) so
+    # the onion PRIVATE KEY dir is never briefly group/other-readable on a shared box.
+    data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     with contextlib.suppress(OSError):
         os.chmod(data_dir, 0o700)
-    hs_dir.mkdir(parents=True, exist_ok=True)
+    hs_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     with contextlib.suppress(OSError):
         os.chmod(hs_dir, 0o700)
     torrc = tor_dir / "torrc"
@@ -118,15 +117,15 @@ def _write_torrc(tor_dir: Path, socks_port: int, forward_to_port: int) -> Path:
 class TorTransport:
     """A node's private Tor process: one persistent onion service + a SOCKS dialer."""
 
-    def __init__(self, mesh_dir: Path, *, binary_path: str,
-                 socks_port: int = 0) -> None:
+    def __init__(self, mesh_dir: Path, *, binary_path: str) -> None:
         self._tor_dir = Path(mesh_dir) / "tor"
         self._binary = binary_path
-        # 0 → pick a free ephemeral port at start; a fixed value is honored for
-        # tests / an operator who pins it.
-        self._socks_port = socks_port
+        self._socks_port = 0  # a free ephemeral port, picked at start()
         self._proc: asyncio.subprocess.Process | None = None
         self._pump_task: asyncio.Task | None = None
+        # A dedicated loopback listener the onion service forwards to, so an inbound
+        # Tor link is distinguishable from a LAN one (see start()).
+        self._forward_server: asyncio.base_events.Server | None = None
         self._bootstrapped = asyncio.Event()
         self._onion = ""
 
@@ -137,25 +136,35 @@ class TorTransport:
         service is up. Advertised verbatim in the signed NodeInfo."""
         return self._onion or None
 
-    @property
-    def socks_port(self) -> int:
-        return self._socks_port
-
     # MARK: - lifecycle
 
-    async def start(self, forward_to_port: int, *,
+    async def start(self, inbound_handler, *,
                     bootstrap_timeout: float = 90.0) -> bool:
-        """Spawn Tor, wait for bootstrap, and read the onion hostname. Returns True
-        when the transport is usable (onion known, SOCKS live); False on any
-        failure — the caller then runs LAN-only. Never raises."""
+        """Spawn Tor behind a private onion service and return True once it is usable
+        (onion known, SOCKS live); False on any failure — the caller then runs
+        LAN-only. Never raises.
+
+        ``inbound_handler(reader, writer)`` receives every connection that arrives
+        over Tor. The onion forwards ONION_VIRTPORT to a DEDICATED loopback listener
+        we own here (not the node's shared TCP port), so the node can TAG an inbound
+        Tor link as ``tor`` instead of it being indistinguishable from a loopback LAN
+        link on the shared listener."""
         if not self._binary:
             return False
-        if self._socks_port <= 0:
-            self._socks_port = _free_port()
+        self._socks_port = _free_port()
         try:
-            torrc = _write_torrc(self._tor_dir, self._socks_port, forward_to_port)
+            self._forward_server = await asyncio.start_server(
+                inbound_handler, "127.0.0.1", 0, limit=protocol.MAX_LINE_BYTES)
+        except OSError as exc:
+            activity.log("mesh", "warn",
+                         f"Mesh/Tor: cannot open the forward listener ({exc})")
+            return False
+        forward_port = self._forward_server.sockets[0].getsockname()[1]
+        try:
+            torrc = _write_torrc(self._tor_dir, self._socks_port, forward_port)
         except OSError as exc:
             activity.log("mesh", "warn", f"Mesh/Tor: cannot write torrc ({exc})")
+            await self.stop()
             return False
         try:
             self._proc = await asyncio.create_subprocess_exec(
@@ -165,17 +174,13 @@ class TorTransport:
             )
         except OSError as exc:
             activity.log("mesh", "warn", f"Mesh/Tor: cannot launch tor ({exc})")
+            await self.stop()
             return False
         # Drain stdout forever (so tor never blocks on a full pipe) and flip the
         # bootstrap event when Tor reports it is fully connected.
         self._pump_task = asyncio.get_running_loop().create_task(
             self._pump_stdout(), name="mesh-tor-stdout")
-        try:
-            await asyncio.wait_for(self._bootstrapped.wait(),
-                                   timeout=bootstrap_timeout)
-        except asyncio.TimeoutError:
-            activity.log("mesh", "warn",
-                         "Mesh/Tor: bootstrap timed out — staying LAN-only")
+        if not await self._await_bootstrap(bootstrap_timeout):
             await self.stop()
             return False
         onion = await self._read_hostname()
@@ -188,6 +193,26 @@ class TorTransport:
         activity.log("mesh", "mesh-up",
                      f"Mesh/Tor: onion service up — {onion} (SOCKS :{self._socks_port})")
         return True
+
+    async def _await_bootstrap(self, timeout: float) -> bool:
+        """Wait for 'Bootstrapped 100%', but FAIL FAST if the tor process exits
+        first (a bad torrc, a crash) instead of blocking the whole timeout for an
+        already-dead process."""
+        boot = asyncio.ensure_future(self._bootstrapped.wait())
+        dead = asyncio.ensure_future(self._proc.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                {boot, dead}, timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for t in (boot, dead):
+                if not t.done():
+                    t.cancel()
+        if self._bootstrapped.is_set():
+            return True
+        why = "tor exited during bootstrap" if dead in done else "bootstrap timed out"
+        activity.log("mesh", "warn", f"Mesh/Tor: {why} — staying LAN-only")
+        return False
 
     async def _pump_stdout(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
@@ -216,7 +241,8 @@ class TorTransport:
         return ""
 
     async def stop(self) -> None:
-        """Terminate the tor child and its stdout pump. Best-effort, never raises."""
+        """Terminate the tor child, its stdout pump, and the forward listener.
+        Best-effort, never raises."""
         if self._pump_task is not None:
             self._pump_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -231,6 +257,11 @@ class TorTransport:
                 with contextlib.suppress(ProcessLookupError, OSError):
                     self._proc.kill()
             self._proc = None
+        if self._forward_server is not None:
+            self._forward_server.close()
+            with contextlib.suppress(Exception):
+                await self._forward_server.wait_closed()
+            self._forward_server = None
 
     # MARK: - outbound: SOCKS5 CONNECT through our tor to a peer's onion
 

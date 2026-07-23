@@ -132,16 +132,33 @@ def test_learns_and_persists_a_peer_onion_from_its_hello(tmp_path, monkeypatch):
     assert node._peer_cache["peer-b"] == ("192.168.1.9", 40901)
 
 
-def test_a_tor_link_host_never_enters_the_lan_redial_cache(tmp_path, monkeypatch):
-    """An outbound Tor dial runs the hello with host = the .onion. That must be
-    remembered as an ONION (redialable over Tor), never written into peers.json,
-    whose entries are dialed as host:port directly and can't resolve an onion."""
+def test_a_tor_link_never_enters_the_lan_redial_cache(tmp_path, monkeypatch):
+    """A link tagged 'tor' must remember the peer's onion but NEVER write a LAN
+    redial entry — that cache dials host:port directly, and a Tor link's endpoint
+    (an .onion outbound, or loopback INBOUND) is not redialable that way. The
+    inbound case (host = loopback) is exactly what the transport flag catches and a
+    naive '.onion in host' check would miss."""
     node = _fresh_node(tmp_path, monkeypatch, "a")
     bkey = crypto.DeviceKey(Ed25519PrivateKey.generate())
     braw = _signed_advert(bkey, "peer-b", onion=_ONION_B, tcp_port=40901)
-    node._learn_node(NodeInfo.from_dict(braw), _ONION_B, _FakeWriter(), raw=braw)
+    fw = _FakeWriter()
+    node._link_transport[fw] = "tor"  # this link is over Tor (inbound lands on loopback)
+    node._learn_node(NodeInfo.from_dict(braw), "127.0.0.1", fw, raw=braw)
     assert node._onion_cache["peer-b"].onion == _ONION_B  # onion remembered…
     assert "peer-b" not in node._peer_cache                # …LAN cache untouched
+    assert node.peers["peer-b"].transport == "tor"
+
+
+def test_gossiped_onion_is_not_remembered_only_a_direct_link(tmp_path, monkeypatch):
+    """Onions are remembered only for peers we DIRECTLY met (a hello / paste), not
+    from third-party gossip — matching the LAN 'first sight' model. A `node`
+    advert relayed by a peer (link_writer=None) carries an onion but must not
+    seed a Tor redial target for a peer we've never linked to."""
+    node = _fresh_node(tmp_path, monkeypatch, "a")
+    bkey = crypto.DeviceKey(Ed25519PrivateKey.generate())
+    braw = _signed_advert(bkey, "peer-b", onion=_ONION_B, tcp_port=40901)
+    node._learn_node(NodeInfo.from_dict(braw), "10.0.0.2", None, raw=braw)  # gossip relay
+    assert "peer-b" not in node._onion_cache
 
 
 # MARK: - backoff
@@ -188,6 +205,28 @@ def test_redial_targets_respects_dial_rule_liveness_and_backoff(tmp_path, monkey
     assert node._tor_redial_targets(now) == []
 
 
+def test_tor_dial_backs_off_when_the_socks_handshake_dies(tmp_path, monkeypatch):
+    """A dial that dies mid-SOCKS-handshake raises IncompleteReadError (an EOFError
+    subclass, NOT an OSError). It must be treated as a reachability miss — grow the
+    backoff, don't escape the dial task with an unhandled exception."""
+    node = _fresh_node(tmp_path, monkeypatch)
+
+    class _Broken:
+        def onion_address(self):
+            return _ONION_B
+
+        async def dial(self, _onion):
+            raise asyncio.IncompleteReadError(b"", 2)  # tor closed mid-handshake
+
+        async def stop(self):
+            pass
+
+    node.tor = _Broken()
+    asyncio.run(node._tor_dial(_ONION_B, peer_id="p"))  # must NOT raise
+    assert "p" in node._tor_backoff and node._tor_backoff["p"].next_attempt > 0
+    assert _ONION_B not in node._tor_dialing  # in-flight guard released
+
+
 # MARK: - the capstone: a real link over an injected dialer, with a dispatch on it
 
 
@@ -223,7 +262,8 @@ def test_manual_paste_links_over_tor_and_a_dispatch_runs_on_the_peer(
                 lambda: (a.peers[b.local.id].verified_fp is not None
                          and b.peers[a.local.id].verified_fp is not None),
                 5.0, "device keys were not mutually verified")
-            assert a.peers[b.local.id].addr == _ONION_B  # snapshot reads this as Tor
+            assert a.peers[b.local.id].addr == _ONION_B  # dialer's addr = the onion
+            assert a.peers[b.local.id].transport == "tor"  # link tagged over Tor
             # A dispatch rides the Tor link and runs on B, just like over the LAN.
             results = await a.dispatch("audit", "hello over tor",
                                        target=b.local.id)
