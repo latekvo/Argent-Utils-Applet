@@ -80,6 +80,8 @@ The resource advertisement for one node. Appears inside `hello` and `node`, and
 | `tokens` | string | no (`"ok"`) | **effective** budget state: `"ok"`/`"low"`/`"out"` - see [05](05-resources.md#tokens). |
 | `tokensAuto` | bool | no (`true`) | whether `tokens` is auto-derived from real usage (vs a manual pin). Display hint. |
 | `tokensPct` | float | no (`1.0`) | fraction of the heuristic token ceiling remaining (`0.0`-`1.0`), for a live "NN%" readout. |
+| `tokensSessionPct` | float | no (omitted) | real remaining-quota fraction (`0.0`-`1.0`) of the **5-hour session** rate-limit window, from the node's OAuth usage probe. Additive/optional; omitted when unprobed (heuristic fallback). |
+| `tokensWeekPct` | float | no (omitted) | real remaining-quota fraction (`0.0`-`1.0`) of the **7-day week** rate-limit window, from the node's OAuth usage probe. Additive/optional; omitted when unprobed. The binding (smaller) of the two windows drives the effective `ok`/`low`/`out` token state. |
 | `tcpPort` | int | no (`0`) | the node's TCP listen port. |
 | `epoch` | float | no (`0`) | incarnation stamp; increases each process (re)start. |
 | `seq` | int | no (`0`) | per-incarnation update counter. |
@@ -90,8 +92,9 @@ The resource advertisement for one node. Appears inside `hello` and `node`, and
 | `sig` | string | no | base64 Ed25519 signature by this node's device key over the advert's canonical bytes, authenticating it end to end across relays. A **keyed** advert (one with a `pubkey`) MUST carry a valid `sig` or be dropped; a keyless advert carries none. See [11 - authenticated gossip](11-trust-and-balancing.md#authenticated-gossip). |
 | `v` | int | no (`1`) | protocol version of this advertisement. |
 
-`pubkey`, `stats`, and `sig` are **additive and optional**: all are **omitted from
-the wire form when empty**, so a v1 advertisement that sets none is byte-identical
+`pubkey`, `stats`, `sig`, `tokensSessionPct`, and `tokensWeekPct` are **additive
+and optional**: all are **omitted from the wire form when empty**, so a v1
+advertisement that sets none is byte-identical
 to before. The `stats` sub-keys are `plan` (string, account-type id, e.g.
 `max-20x`), `surplus` (float, the **burn-down ratio** routing ranks on - budget left
 ÷ clock left to reset; `1.0` = on pace, capped at `10.0`), and the display-only
@@ -109,7 +112,11 @@ an older one overwrite a newer one. See [08-state](08-state.md#liveness--incarna
 
 Validation: if `id` is missing, or a present numeric field fails to parse as its
 type (e.g. `tier` is `"abc"`), the whole NodeInfo is invalid and MUST be dropped
-(not partially applied).
+(not partially applied). The same guard covers a present numeric field that is
+**non-finite** (`∞`/`NaN` — JSON `1e999` parses to `∞`): it MUST be dropped (the
+whole record). This rule is not NodeInfo-specific — a [`work-claim`](#work-claim)'s
+`epoch` and a [`dispatch`](#dispatch) Job's `requestedAt` route through the same
+finite guard, so a non-finite value in either likewise drops its whole record.
 
 ### Job
 

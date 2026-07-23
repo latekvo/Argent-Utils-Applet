@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -759,7 +760,10 @@ class MeshNode:
         # An out-of-range port is not just invalid — asyncio.open_connection() would
         # raise OverflowError (not OSError) from the C bind, escaping _dial's except
         # and crashing the dial task. Reject anything a socket can't hold up front.
-        if not isinstance(tcp_port, int) or not 0 < tcp_port <= 65535:
+        # `bool` is an int subclass, so a JSON `true`/`false` would otherwise pass as
+        # port 1/0; a boolean is not a "positive integer" tcpPort, so reject it too.
+        if (isinstance(tcp_port, bool) or not isinstance(tcp_port, int)
+                or not 0 < tcp_port <= 65535):
             return
         peer = self.peers.get(peer_id)
         if peer is not None and peer.linked:
@@ -1077,15 +1081,18 @@ class MeshNode:
             return
         # The join fence: with DIPLOMAT_MESH_SECRET set, an opener (peer OR control
         # client) that doesn't present the token gets silently dropped.
-        if first.get("t") in ("ctl", "hello") and \
-                str(first.get("secret", "")) != config.secret():
+        if first.get("t") in ("ctl", "hello") and not hmac.compare_digest(
+                str(first.get("secret", "")).encode("utf-8"),
+                config.secret().encode("utf-8")):
             writer.close()
             return
         if first.get("t") == "ctl":
             # A server configured with an API key requires it on the opening ctl,
             # on top of the join secret: the secret admits mesh members, the key
             # authenticates who may drive/submit work to this node.
-            if config.api_key() and str(first.get("apiKey", "")) != config.api_key():
+            if config.api_key() and not hmac.compare_digest(
+                    str(first.get("apiKey", "")).encode("utf-8"),
+                    config.api_key().encode("utf-8")):
                 writer.close()
                 return
             await self._run_ctl(reader, writer)
@@ -1165,7 +1172,20 @@ class MeshNode:
                     if msg.get("t") != "hello":
                         raise ValueError("first link message was not a hello")
                     authenticated = True  # _on_message re-checks the secret
-                got = self._on_message(msg, host, writer)
+                try:
+                    got = self._on_message(msg, host, writer)
+                except (ConnectionError, OSError):
+                    raise  # a real socket failure in a handler → tear the link down
+                except Exception as exc:  # noqa: BLE001
+                    # A malformed/hostile message MUST NOT wedge or drop the link
+                    # (conformance rule 10 / docs/szpontnet/09). Handlers normalize
+                    # their own input, but this makes the "never crash on a peer's
+                    # message" invariant structural rather than per-handler: any
+                    # unexpected KeyError/TypeError/OverflowError/ValueError from one
+                    # message is logged and that message dropped, the link kept.
+                    activity.log("mesh", "mesh-msg-error",
+                                 f"Mesh: dropped a message raising {exc!r}; link kept")
+                    continue
                 if got and peer_id is None:
                     peer_id = got
         except (ConnectionError, OSError, asyncio.TimeoutError,
@@ -1300,7 +1320,8 @@ class MeshNode:
         """True unless this node has an API key configured and the message fails
         to present a matching ``apiKey`` (the server request-authentication gate)."""
         key = config.api_key()
-        return not key or str(msg.get("apiKey", "")) == key
+        return not key or hmac.compare_digest(
+            str(msg.get("apiKey", "")).encode("utf-8"), key.encode("utf-8"))
 
     # MARK: - gossip authentication (self-signed adverts + overrides)
 
@@ -1465,7 +1486,12 @@ class MeshNode:
         # skips bound writers and drain errors are suppressed — never trips, and the dead
         # peer's work-claims stay authoritative for the whole OS TCP window (~minutes)
         # instead of peerTimeoutSecs (~seconds). A live linked peer needs no gossip refresh:
-        # its own heartbeats already advance last_seen via _on_message.
+        # its own heartbeats already advance last_seen via _on_message. A gossip-only
+        # PHANTOM is refreshed on ANY advert (even a non-fresh relay): its last_seen is its
+        # only liveness signal, and an alive-but-idle phantom holds a stable (epoch, seq),
+        # so gating the refresh on freshness would wrongly reap it. The residual (a replay
+        # keeps a truly-dead phantom in the snapshot) is bounded by _MAX_PEERS and never
+        # affects routing (a down peer is already out of the assignment input).
         if link_writer is not None or not peer.linked:
             peer.last_seen = time.monotonic()
             peer.down_since = None
@@ -1787,21 +1813,50 @@ class MeshNode:
         cur = book.get(rec.node)
         if cur is not None and not rec.newer_than(cur):
             return False
-        # The cap only fences a gossip flood of spoofed PEER work_keys. Our OWN claim
-        # is authoritative locally and MUST always be stored — dropping it silently
-        # (via _emit_claim, which ignores this return) leaves _own_claim None, so the
-        # executor watcher releases the lease on its first poll and a re-dispatch
-        # double-spawns the same work while the gossiped 'active' claim is never
-        # withdrawn. Self is never a flood source, so exempt it — AND count only PEER
-        # records toward the cap: our own records (esp. un-reaped 'released' tombstones
-        # on a long-lived node) must never fill the book and starve real peer claims,
-        # which would drop a live peer's lease and break origination dedup.
-        if (cur is None and rec.node != self.local.id
-                and sum(1 for b in self._claims.values()
-                        for n in b if n != self.local.id) >= _MAX_CLAIMS):
-            if not book:
-                self._claims.pop(rec.work_key, None)  # don't leave an empty book
-            return False
+        # The cap fences a gossip flood of spoofed PEER work_keys. Our OWN claim is
+        # authoritative locally and MUST always be stored — dropping it silently (via
+        # _emit_claim, which ignores this return) leaves _own_claim None, so the executor
+        # watcher releases the lease and a re-dispatch double-spawns. Self is never a
+        # flood source, so exempt it AND never count its records toward the cap.
+        #
+        # At the cap, refusing every new record let a verified-but-FOREIGN device (or any
+        # keyed intruder inside the join fence) fill the book with 4096 spoofed workKeys
+        # and, since a refused new (workKey, claimant) never stores, starve EVERY genuine
+        # personal claim thereafter — breaking origination dedup mesh-wide and violating
+        # the spec's "a foreign or keyless node can never deny you work"
+        # (docs/szpontnet/12#security-properties). So at the cap an AUTHORITATIVE incoming
+        # claim — one that can actually win ownership: a live, personal, key-bound
+        # claimant — may EVICT one expendable stored record to make room: a `released`
+        # tombstone, or a record that is not [authoritative](_claim_authoritative) (a
+        # foreign/down/keyless/stale claimant that can never win ownership here). A
+        # NON-authoritative incoming claim is still refused outright, exactly as before —
+        # so a foreign flood can never displace anything (it only ever occupies evictable
+        # slots), yet can never starve a real personal claim either (which evicts one of
+        # those slots). We refuse only when the book is full of live authoritative claims
+        # (genuine saturation) or the incomer itself is non-authoritative.
+        if cur is None and rec.node != self.local.id:
+            peer_count = 0
+            victim: tuple[str, str] | None = None
+            for wk, b in self._claims.items():
+                for n, r in b.items():
+                    if n == self.local.id:
+                        continue
+                    peer_count += 1
+                    if victim is None and (not r.active
+                                           or not self._claim_authoritative(n, r)):
+                        victim = (wk, n)
+                if peer_count >= _MAX_CLAIMS and victim is not None:
+                    break  # cap reached and a victim found — no need to scan further
+            if peer_count >= _MAX_CLAIMS:
+                if victim is None or not self._claim_authoritative(rec.node, rec):
+                    if not book:
+                        self._claims.pop(rec.work_key, None)  # don't leave an empty book
+                    return False
+                vk, vn = victim
+                del self._claims[vk][vn]
+                if not self._claims[vk]:
+                    self._claims.pop(vk, None)
+                book = self._claims.setdefault(rec.work_key, {})  # victim may have been us
         book[rec.node] = rec
         return True
 
@@ -2382,10 +2437,20 @@ class MeshNode:
     def _result_path(self, job_id: str, incoming: bool = False):
         """Where a confined job's artifact is staged: ``out-*`` is what our sandbox
         writes and we return; ``in-*`` is what we hand our own result handler when a
-        foreign executor returns to us. Under the per-node mesh dir (isolated)."""
+        foreign executor returns to us. Under the per-node mesh dir (isolated).
+
+        The filename is derived from a SHA-256 of the job id, never the id itself: on
+        the executor side ``job.id`` is a fully attacker-controlled string from a
+        foreign SzpontRequest, and interpolating it raw let ``id = "../../.."`` steer
+        the confined artifact's path outside ``results/`` (a runner that shares the host
+        FS and creates its parent dir would then write the sandbox's output to an
+        operator-chosen location). Hashing yields a collision-free hex token — no path
+        separators, no ``..`` — so the staging path is always inside ``results/`` while
+        still deterministic per job (executor write and host read agree on it)."""
+        token = hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:32]
         d = identity.mesh_dir() / "results"
         d.mkdir(parents=True, exist_ok=True)
-        return d / (f"in-{job_id}.json" if incoming else f"out-{job_id}.json")
+        return d / (f"in-{token}.json" if incoming else f"out-{token}.json")
 
     def _run_confined(self, job: Job, requester_id: str) -> tuple[str, str, bool]:
         """Run a foreign request under zero trust: launch the confinement runner on
@@ -2411,6 +2476,13 @@ class MeshNode:
         # over a result that won't come (the original job.id carries the one result).
         if wk and wk in self._agents:
             return "spawned", "", True
+        # Bound the in-flight confined set like the other two foreign maps
+        # (_pending_results / _awaiting_result), so a burst of foreign dispatches within
+        # one job-timeout window can't grow it without limit (docs/szpontnet/13 — "both
+        # ends bound their bookkeeping"). At the cap, decline so the originator fails over.
+        if (job.id not in self._confined_running
+                and len(self._confined_running) >= _MAX_FOREIGN):
+            return "failed", "confined-execution capacity reached", False
         result_path = self._result_path(job.id)
         try:
             spawnjob.spawn_confined(job.prompt, str(result_path))

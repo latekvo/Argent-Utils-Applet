@@ -97,8 +97,23 @@ gossip). See
 
 **Authenticated-gossip construction.** A gossiped advertisement / override carries a
 `sig` field: an Ed25519 signature over `<tag> || canonical(payload)`, where
-`canonical(x)` = JSON of `x` **with its `sig` removed, keys sorted, compact
-separators** (`,`/`:`), and the tags are `szpontnet-nodeinfo-v1:` (advertisements),
+`canonical(x)` = JSON of `x` **with its top-level `sig` removed, keys sorted, compact
+separators** (`,`/`:`), UTF-8 encoded. Precisely, and normatively (so a second
+implementer reproduces byte-identical signing input):
+
+- only the **top-level** `sig` field is removed before signing; a **nested** `sig` (e.g.
+  one inside a job-result's `result` sub-object) is **not** stripped and **is** covered
+  by the signature;
+- strings use **ASCII escaping** (`ensure_ascii`): every non-ASCII code point is emitted
+  as a lowercase `\uXXXX` escape, so a node `name` with non-ASCII characters signs
+  byte-identically across implementations;
+- numbers: an **integer** carries no decimal point, and any **float-typed** signed field
+  (notably `epoch`, and the `stats` floats) MUST be formatted with the **shortest
+  round-trip decimal** - the algorithm Python `repr`, ECMA-262 Number-to-String, Go, and
+  Swift all use by default. Implementations SHOULD avoid introducing further float-typed
+  fields into signed payloads.
+
+The tags are `szpontnet-nodeinfo-v1:` (advertisements),
 `szpontnet-overrides-v1:` (overrides), and `szpontnet-workclaim-v1:`
 ([work-claims](12-work-claims.md#authentication)). The same canonical construction,
 under the tag `szpontnet-jobresult-v1:`, signs a
@@ -161,6 +176,16 @@ ranking constants: `NEUTRAL_SURPLUS` = `1.0` (a node with no usable `surplus` fi
 `PACE_CAP` = `10.0` (max surplus). Full sort keys in
 [06-coordination](06-coordination.md#ranking); the surplus definition in
 [11](11-trust-and-balancing.md#surplus).
+
+> **`round()` is round-half-to-even (normative).** The `round(surplus / 0.05)` bucketing
+> above MUST use **round-half-to-even** (banker's rounding), matching the reference's
+> Python `round()`. Consensus placement MUST be byte-identical across implementations
+> ([06 determinism](06-coordination.md#determinism-requirements-normative)), and reachable
+> advertised surpluses land exactly on half-bucket boundaries (e.g. `0.025`, `0.125`,
+> `0.225`), where round-half-to-even and the round-half-away-from-zero default of
+> Swift/Go/JS pick different buckets - hence a possibly different owner. A second
+> implementation MUST use the ties-to-even primitive explicitly (Swift `.toNearestOrEven`,
+> Rust `round_ties_even`), never the language default.
 
 ## Duties (v1 vocabulary)
 
