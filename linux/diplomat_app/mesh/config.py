@@ -115,9 +115,13 @@ def tor_bootstrap_timeout() -> float:
     (DIPLOMAT_MESH_TOR_BOOTSTRAP_SECS). Tor's first bootstrap can be slow; the node
     stays fully usable on the LAN in the meantime."""
     try:
-        return float(os.environ.get("DIPLOMAT_MESH_TOR_BOOTSTRAP_SECS", "90")) or 90.0
+        v = float(os.environ.get("DIPLOMAT_MESH_TOR_BOOTSTRAP_SECS", "90"))
     except ValueError:
         return 90.0
+    # Reject non-finite / non-positive (e.g. "inf" from 1e999, "nan", "-1", "0"): a
+    # non-finite timeout makes asyncio.wait block FOREVER — the opposite of the
+    # docstring's "give up and stay LAN-only" — and a non-positive one is meaningless.
+    return v if math.isfinite(v) and v > 0 else 90.0
 
 
 def server_mode() -> bool:

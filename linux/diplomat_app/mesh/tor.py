@@ -39,6 +39,7 @@ import contextlib
 import os
 import re
 import shutil
+import signal
 from pathlib import Path
 
 from .. import activity
@@ -84,6 +85,19 @@ def binary() -> str | None:
     """The resolved ``tor`` executable path, or None if not installed. Honors
     ``DIPLOMAT_MESH_TOR_BINARY`` for a non-PATH install."""
     return shutil.which(os.environ.get("DIPLOMAT_MESH_TOR_BINARY", "tor"))
+
+
+def _pdeathsig() -> None:
+    """Run in the forked child before exec: ask the Linux kernel to SIGTERM this
+    process when its parent (the mesh node) dies — even on SIGKILL/OOM, which skip our
+    graceful ``stop()``. Best-effort: any failure (non-Linux, missing libc, denied
+    syscall) is swallowed so the child still execs. ``prctl(PR_SET_PDEATHSIG, ...)``
+    persists across exec for a non-setuid binary like ``tor``."""
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        _PR_SET_PDEATHSIG = 1
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(_PR_SET_PDEATHSIG, signal.SIGTERM)
 
 
 def _write_torrc(tor_dir: Path, socks_port: int, forward_to_port: int) -> Path:
@@ -137,8 +151,19 @@ class TorTransport:
 
     def onion_address(self) -> str | None:
         """The permanent ``<hash>.onion`` this node listens on, or None until the
-        service is up. Advertised verbatim in the signed NodeInfo."""
-        return self._onion or None
+        service is up — and None AGAIN once the tor child has exited (crash, OOM-kill,
+        operator ``kill``). Gating on liveness is the post-bootstrap twin of
+        ``_await_bootstrap``'s fail-fast: without it the node would keep advertising a
+        dead onion (peers dial it forever) and keep trying to dial out through a dead
+        SOCKS port, while ``--status`` still claimed ``ready``. When tor dies the node
+        simply degrades to LAN-only until it is restarted. Advertised verbatim in the
+        signed NodeInfo."""
+        if not self._onion:
+            return None
+        proc = self._proc
+        if proc is None or proc.returncode is not None:
+            return None  # tor has exited — the onion is no longer served
+        return self._onion
 
     # MARK: - lifecycle
 
@@ -181,6 +206,12 @@ class TorTransport:
                 # stdout pipe fills and tor blocks. Real tor log lines are short, so
                 # this only removes a latent foot-gun (a chatty/hostile binary).
                 limit=protocol.MAX_LINE_BYTES,
+                # Tie tor's lifetime to ours: if the node dies WITHOUT running stop()
+                # (SIGKILL, OOM-kill, crash), the kernel SIGTERMs tor too. Without this
+                # the orphaned tor keeps its DataDirectory lock and the NEXT node's tor
+                # can't start (lock held) — a silent, permanent LAN-only until the
+                # operator reaps it by hand. See _pdeathsig.
+                preexec_fn=_pdeathsig,
             )
         except OSError as exc:
             activity.log("mesh", "warn", f"Mesh/Tor: cannot launch tor ({exc})")

@@ -185,7 +185,9 @@ def test_backoff_grows_geometrically_and_resets(tmp_path, monkeypatch):
 def test_redial_targets_respects_dial_rule_liveness_and_backoff(tmp_path, monkeypatch):
     import time as _time
 
-    node = _fresh_node(tmp_path, monkeypatch)
+    # default trust personal so the entries clear the "only auto-dial personal peers"
+    # gate — this test isolates the dial-rule / liveness / backoff logic.
+    node = _fresh_node(tmp_path, monkeypatch, DIPLOMAT_MESH_DEFAULT_TRUST="personal")
     lo, hi = ("0" * 32, "z" * 32)  # one below our id, one above
     node.local = _dc_replace(node.local, id="m" * 32)
     node._onion_cache = {
@@ -395,6 +397,104 @@ def test_await_bootstrap_fails_fast_when_the_pump_dies(tmp_path):
         return await asyncio.wait_for(t._await_bootstrap(30.0), timeout=3.0)
 
     assert asyncio.run(_run()) is False
+
+
+# MARK: - lifecycle: a dead tor degrades to LAN-only (onion no longer advertised)
+
+
+def test_onion_address_is_none_once_tor_has_exited(tmp_path):
+    """After a successful start(), if the tor child later dies (crash/OOM/kill), the
+    onion is no longer served — onion_address() must return None so the node stops
+    advertising and dialing a dead onion and degrades to LAN-only, instead of claiming
+    a WAN handle that no longer works."""
+    t = tor.TorTransport(tmp_path, binary_path="/nonexistent")
+    t._onion = _ONION_A
+
+    class _Alive:
+        returncode = None
+
+    class _Dead:
+        returncode = -9  # tor was killed
+
+    t._proc = _Alive()
+    assert t.onion_address() == _ONION_A     # live tor → onion advertised
+    t._proc = _Dead()
+    assert t.onion_address() is None         # tor exited → degrade to LAN-only
+    t._proc = None
+    assert t.onion_address() is None
+
+
+def test_pdeathsig_is_callable_and_best_effort(tmp_path):
+    """_pdeathsig runs in the forked child before exec; it must NEVER raise (any
+    failure is swallowed so tor still execs). The kill-on-parent-death behavior itself
+    is verified out-of-band via a stand-in child."""
+    tor._pdeathsig()  # must not raise
+
+
+# MARK: - security: only PERSONAL peers are auto-dialed over Tor
+
+
+_B32 = "abcdefghijklmnopqrstuvwxyz234567"
+
+
+def _mk_onion(i: int) -> str:
+    """A unique valid v3 onion per i (56 base32 chars + .onion)."""
+    s, n = "", i
+    for _ in range(56):
+        s += _B32[n % 32]
+        n //= 32
+    return s + ".onion"
+
+
+def test_only_personal_onions_are_auto_redial_targets(tmp_path, monkeypatch):
+    """A linked foreign peer can advertise an arbitrary (attacker-chosen) onion; the
+    node must NOT auto-dial it — else it becomes a Tor-dial reflector aimed by the
+    attacker and leaks a signed hello to a destination it picked. Only onions of peers
+    we trust as PERSONAL are auto-redial targets."""
+    import time as _time
+
+    node = _fresh_node(tmp_path, monkeypatch)  # default trust: foreign
+    node.local = _dc_replace(node.local, id="0" * 32)  # sorts below both peers
+    pk = crypto.DeviceKey(Ed25519PrivateKey.generate())
+    node.add_trusted(pk.fingerprint, "friend")
+    node._onion_cache = {
+        "peer-personal": onioncache.OnionEntry(onion=_ONION_A, fingerprint=pk.fingerprint),
+        "peer-foreign": onioncache.OnionEntry(onion=_ONION_B, fingerprint="deadbeef"),
+    }
+    targets = [pid for pid, _ in node._tor_redial_targets(_time.monotonic())]
+    assert targets == ["peer-personal"]  # the foreign onion is never auto-dialed
+
+
+def test_foreign_onion_churn_does_not_evict_a_personal_entry(tmp_path, monkeypatch):
+    """A single linked foreign peer can advertise many distinct signed adverts, filling
+    the 256-entry onion cache. Eviction must drop FOREIGN entries first, so the flood
+    cannot push out the onion of a personal peer we actually redial (an isolation DoS
+    on our WAN reconnect)."""
+    node = _fresh_node(tmp_path, monkeypatch)  # default trust: foreign
+    pk = crypto.DeviceKey(Ed25519PrivateKey.generate())
+    node.add_trusted(pk.fingerprint, "friend")
+    node._remember_onion("peer-personal", _ONION_A, pk.fingerprint)  # a personal entry
+    for i in range(nodemod._MAX_PEER_CACHE + 50):  # overflow the cache with foreign
+        node._remember_onion(f"foreign-{i}", _mk_onion(i), "deadbeef")
+    assert len(node._onion_cache) == nodemod._MAX_PEER_CACHE
+    assert "peer-personal" in node._onion_cache  # personal survived the foreign flood
+
+
+# MARK: - config: the bootstrap timeout rejects non-finite / non-positive values
+
+
+def test_tor_bootstrap_timeout_rejects_non_finite(monkeypatch):
+    """A non-finite bootstrap timeout (``inf`` from ``1e999``, ``nan``) would make
+    asyncio.wait block FOREVER — the opposite of "give up and stay LAN-only" — and a
+    non-positive one is meaningless. All fall back to the 90s default; a sane value
+    passes through."""
+    from diplomat_app.mesh import config
+
+    for bad in ("inf", "1e999", "-inf", "nan", "-1", "0"):
+        monkeypatch.setenv("DIPLOMAT_MESH_TOR_BOOTSTRAP_SECS", bad)
+        assert config.tor_bootstrap_timeout() == 90.0
+    monkeypatch.setenv("DIPLOMAT_MESH_TOR_BOOTSTRAP_SECS", "45")
+    assert config.tor_bootstrap_timeout() == 45.0
 
 
 # MARK: - the capstone: a real link over an injected dialer, with a dispatch on it

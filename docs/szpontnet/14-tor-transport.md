@@ -60,8 +60,12 @@ missing or stale entry costs at most a fenced dial.
 
 ## Reconnecting: reachability with backoff
 
-A node probes each known-but-unseen peer by **attempting the Tor dial and running
-the handshake**. The same
+A node auto-dials each known-but-unseen peer **it trusts as `personal`** by
+**attempting the Tor dial and running the handshake** — it never *originates* a Tor
+dial to a `foreign` peer. Auto-dialing a foreign, peer-advertised onion would let a
+linked foreign peer aim your node at an arbitrary (third-party) onion it chose — a
+dial reflector that also leaks your signed `hello` to that destination — so foreign
+peers reach you **inbound** only (or by a deliberate manual paste, below). The same
 [dial rule](02-discovery.md#the-dial-rule-smaller-id-dials) as the LAN applies
 (only the smaller-id side auto-dials, so exactly one link forms per pair), and the
 schedule is **per-peer exponential backoff**: each probe pre-schedules the next one
@@ -101,6 +105,14 @@ bootstrap times out, or the onion never comes up, the node logs it and stays
 **LAN-only** — the same graceful degradation as the keyless path when
 `cryptography` is absent. The onion **key is persisted**, so the `.onion` address is
 stable across restarts.
+
+Degradation also extends **past** bootstrap: if the `tor` child later dies (crash,
+OOM-kill), the node stops advertising and dialing the now-dead onion and reports
+Tor as not-ready — it degrades back to LAN-only rather than claiming a WAN handle
+that no longer answers. Conversely, `tor`'s lifetime is **tied to the node's**: it is
+launched so the kernel terminates it if the node dies without a graceful shutdown
+(SIGKILL / OOM), so an orphaned `tor` can't keep the `DataDirectory` lock and block
+the next node's Tor bring-up.
 
 ## Security notes
 

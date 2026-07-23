@@ -970,13 +970,40 @@ class MeshNode:
         self._onion_cache[peer_id] = onioncache.OnionEntry(
             onion=onion, fingerprint=fingerprint)
         while len(self._onion_cache) > _MAX_PEER_CACHE:
-            evicted = next(iter(self._onion_cache))
+            # Evict a FOREIGN entry first (the oldest such), so a churn of foreign
+            # onions — a single linked foreign peer can advertise many distinct signed
+            # adverts — can't push out the onions of the PERSONAL peers we actually
+            # redial (an isolation DoS on our WAN reconnect). Oldest overall only when
+            # every entry is personal.
+            evicted = next((pid for pid, e in self._onion_cache.items()
+                            if not self._onion_is_personal(pid, e)), None)
+            if evicted is None:
+                evicted = next(iter(self._onion_cache))
             del self._onion_cache[evicted]
             # An evicted peer is no longer a Tor redial target, so drop its backoff
             # too — otherwise _tor_backoff accretes orphaned entries under id churn
             # (the unbounded-growth class the caches are already bounded against).
             self._tor_backoff.pop(evicted, None)
         onioncache.save(self._onion_cache)
+
+    def _onion_is_personal(self, peer_id: str, entry: onioncache.OnionEntry) -> bool:
+        """Whether an onion-cache entry belongs to a peer we trust as PERSONAL — the
+        gate for two Tor decisions a linked FOREIGN peer must not get leverage over:
+        (1) ORIGINATING an auto-dial — else a foreign peer that advertised an
+        arbitrary, attacker-chosen onion turns our node into a Tor-dial reflector
+        (and leaks our signed hello to a destination it picked); and (2) surviving
+        cache eviction — else a churn of foreign onions evicts the onions of the
+        personal peers we do redial. Prefer the live peer's verified classification;
+        fall back to the fingerprint the onion was signed-paired with, judged against
+        the ban list then the allowlist / default-trust (so full-altruism, default
+        ``personal``, keeps redialing everyone — the operator's explicit choice)."""
+        peer = self.peers.get(peer_id)
+        if peer is not None and peer.verified_fp is not None:
+            return self._peer_trust(peer) == "personal"
+        fp = entry.fingerprint or ""
+        if banned.is_banned(self._banned, fp, peer_id):
+            return False
+        return trust.classify(fp, self._trusted, self._default_trust) == "personal"
 
     def _tor_reset_backoff(self, peer_id: str) -> None:
         """A Tor link to this peer actually BOUND — clear the backoff so a reachable
@@ -994,15 +1021,25 @@ class MeshNode:
         self._tor_backoff[peer_id] = b
 
     def _tor_redial_targets(self, now: float) -> list[tuple[str, str]]:
-        """Known peers to probe over Tor right now: we hold an onion for them, our
-        id sorts below theirs (the same smaller-id-dials rule as the LAN, so exactly
-        one side dials), they are neither linked nor already being dialed, and their
-        backoff is due. A peer linked over EITHER transport is skipped — that is the
-        whole of "no aggressive switching": a live link is never disturbed."""
+        """Known peers to probe over Tor right now: we hold an onion for them, we
+        trust them as PERSONAL (we never auto-dial a foreign onion — see
+        _onion_is_personal), our id sorts below theirs (the same smaller-id-dials rule
+        as the LAN, so exactly one side dials), they are neither linked nor already
+        being dialed, and their backoff is due. A peer linked over EITHER transport is
+        skipped — that is the whole of "no aggressive switching": a live link is never
+        disturbed."""
         out: list[tuple[str, str]] = []
         for peer_id, entry in self._onion_cache.items():
             onion = tor.normalize_onion(entry.onion)
             if not onion or not self.local.id < peer_id:
+                continue
+            # Only ORIGINATE a Tor dial to a peer we trust as PERSONAL. Auto-dialing a
+            # foreign, attacker-advertised onion would let a linked foreign peer aim
+            # our node at arbitrary (third-party) onions — a dial reflector + a leak of
+            # our signed hello. Foreign peers reach us INBOUND; we don't chase them
+            # over the WAN. The manual `tor-connect` paste (peer_id=None in _tor_dial)
+            # still bypasses this for a deliberate one-shot introduction.
+            if not self._onion_is_personal(peer_id, entry):
                 continue
             peer = self.peers.get(peer_id)
             if (peer is not None and peer.linked) or onion in self._tor_dialing:
